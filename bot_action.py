@@ -18,7 +18,7 @@ VIDEO_URL = os.environ["VIDEO_URL"]
 FORMAT_ID = os.environ.get("FORMAT_ID", "")
 
 TEMP_DIR = "temp_videos"
-MAX_FILE_SIZE = 15 * 1024 * 1024   # 15 MB chunks (safe under Bale's 50 MB limit)
+MAX_FILE_SIZE = 45 * 1024 * 1024   # 15 MB chunks (safe under Bale's 50 MB limit)
 
 logging.basicConfig(
     level=logging.INFO,
