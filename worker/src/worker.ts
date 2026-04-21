@@ -1,4 +1,4 @@
-// worker/src/worker.ts - Polling version with enhanced safety and logging
+// worker/src/worker.ts - Polling version with User-Agent and premium debug
 import { Hono } from 'hono';
 
 export interface Env {
@@ -14,13 +14,14 @@ const app = new Hono<{ Bindings: Env }>();
 
 async function answerCallbackSafe(env: Env, callbackId: string, text?: string, showAlert = false) {
   try {
-    await callBaleApi(env, 'answerCallbackQuery', {
+    const result = await callBaleApi(env, 'answerCallbackQuery', {
       callback_query_id: callbackId,
       text,
       show_alert: showAlert
     });
+    console.log('answerCallbackQuery response:', result);
   } catch (e) {
-    console.warn('answerCallbackQuery failed (may be already answered):', e);
+    console.warn('answerCallbackQuery failed:', e);
   }
 }
 
@@ -47,7 +48,8 @@ async function triggerWorkflow(env: Env, inputs: Record<string, string>) {
       'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
       'Accept': 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'User-Agent': 'BaleYouTubeBot/1.0'   // <-- Required to avoid 403
     },
     body: JSON.stringify({ ref: 'main', inputs })
   });
@@ -75,7 +77,6 @@ function extractYouTubeId(text: string): string | null {
 async function processUpdate(env: Env, update: any) {
   console.log('Processing update:', JSON.stringify(update, null, 2));
 
-  // Handle callback queries
   if (update.callback_query) {
     const cb = update.callback_query;
     const cbData = cb.data;
@@ -84,15 +85,13 @@ async function processUpdate(env: Env, update: any) {
 
     console.log(`Callback data type: ${typeof cbData}, value: ${cbData}`);
 
-    // Validate required fields
     if (!chatId || !callbackId) {
       console.error('Invalid callback_query: missing chatId or callbackId', cb);
       return;
     }
 
-    // If no callback data or not a string, answer with generic message
     if (!cbData || typeof cbData !== 'string') {
-      console.warn('Callback query missing "data" field or data is not a string');
+      console.warn('Callback query missing "data" field or not a string');
       await answerCallbackSafe(env, callbackId, 'This button has no action.');
       return;
     }
@@ -124,9 +123,17 @@ async function processUpdate(env: Env, update: any) {
         await answerCallbackSafe(env, callbackId, 'Error processing request.', true);
       }
     } else if (cbData === 'check_premium') {
-      const hasPremium = await env.USER_PLANS.get(`premium:${chatId}`) === 'true';
+      // --- Premium check with logging ---
+      console.log(`Checking premium for chat ${chatId}`);
+      if (!env.USER_PLANS) {
+        console.error('USER_PLANS KV binding is undefined!');
+        await answerCallbackSafe(env, callbackId, 'Service temporarily unavailable.', true);
+        return;
+      }
+      const hasPremium = await env.USER_PLANS.get(`premium:${chatId}`);
+      console.log(`Premium status for ${chatId}: ${hasPremium}`);
       await answerCallbackSafe(env, callbackId,
-        hasPremium ? '✅ You have premium access.' : '❌ No premium subscription found.',
+        hasPremium === 'true' ? '✅ You have premium access.' : '❌ No premium subscription found.',
         true
       );
     } else {
