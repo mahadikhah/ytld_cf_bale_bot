@@ -2,18 +2,27 @@ name = "bale-yt-bot"
 main = "src/worker.ts"
 compatibility_date = "2025-01-01"
 
-# Observability (recommended)
-[observability]
-[observability.logs]
-enabled = true
-invocation_logs = true
-
-
 # Bind KV namespaces – create these in Cloudflare dashboard first
 kv_namespaces = [
   { binding = "BOT_STATE", id = "c14bfe9bf90146208b85e9bd165685c8" },
   { binding = "USER_PLANS", id = "d644e50e83a04540884bf97745e8bcce" }
 ]
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+persist = true
+head_sampling_rate = 1
+
 
 [triggers]
 crons = ["* * * * *"]
