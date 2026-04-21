@@ -1,4 +1,4 @@
-// worker/src/worker.ts - Polling with loop and immediate callback answers
+// worker/src/worker.ts - Polling with loop, immediate callback answers, and correct payment API
 import { Hono } from 'hono';
 
 export interface Env {
@@ -181,44 +181,28 @@ async function processUpdate(env: Env, update: any) {
       return;
     }
 
-    const invoiceResp = await fetch('https://api.bale.ai/payment/v1/invoice', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.BALE_PAYMENT_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        amount: 1500000,
-        description: 'YouTube Bot Premium (30 days)',
-        callback_url: `https://${env.GITHUB_REPO.split('/')[0]}.workers.dev/payment/callback?user_id=${chatId}`,
-        payer_name: `TelegramUser${chatId}`,
-      })
-    });
+    // Use the correct sendInvoice endpoint (bot API, not separate payment API)
+    const invoiceData = {
+      chat_id: chatId,
+      title: 'YouTube Bot Premium',
+      description: '30-day premium subscription',
+      payload: `premium_${chatId}`,
+      provider_token: env.BALE_PAYMENT_TOKEN,
+      currency: 'IRR',
+      prices: [{ label: 'Premium 30 days', amount: 1500000 }], // amount in Rials
+    };
+
+    const invoiceResp = await callBaleApi(env, 'sendInvoice', invoiceData);
 
     if (!invoiceResp.ok) {
-      const errText = await invoiceResp.text();
-      console.error('Bale invoice creation failed:', invoiceResp.status, errText);
+      console.error('Bale invoice creation failed:', invoiceResp);
       await callBaleApi(env, 'sendMessage', {
         chat_id: chatId,
-        text: `❌ Payment service temporarily unavailable (${invoiceResp.status}). Please try later.`
+        text: `❌ Payment service temporarily unavailable. Please try later.`
       });
       return;
     }
-
-    const invoiceData = await invoiceResp.json() as any;
-    const paymentUrl = invoiceData.payment_url;
-    const trackId = invoiceData.track_id;
-
-    await env.BOT_STATE.put(`payment:${trackId}`, chatId.toString(), { expirationTtl: 3600 });
-
-    const payKeyboard = {
-      inline_keyboard: [[{ text: '💳 Pay 150,000 Toman', url: paymentUrl }]]
-    };
-    await callBaleApi(env, 'sendMessage', {
-      chat_id: chatId,
-      text: 'Click below to complete payment. After payment, use /status to check activation.',
-      reply_markup: payKeyboard
-    });
+    // sendInvoice returns the sent message on success, no need to send another message
     return;
   }
 
@@ -254,7 +238,7 @@ async function processUpdate(env: Env, update: any) {
   });
 }
 
-// ---------- Polling Function with Loop ----------
+// ---------- Polling Function with Fast Loop ----------
 async function pollUpdates(env: Env) {
   if (!env.BOT_STATE) {
     console.error('BOT_STATE undefined');
@@ -268,7 +252,7 @@ async function pollUpdates(env: Env) {
     const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/getUpdates`;
     const params = new URLSearchParams({
       offset: offset.toString(),
-      timeout: '5' // shorter timeout to loop faster
+      timeout: '2' // shorter timeout for faster loops
     });
 
     try {
@@ -295,8 +279,8 @@ async function pollUpdates(env: Env) {
 
       await env.BOT_STATE.put(OFFSET_KEY, offset.toString());
 
-      // Small delay between loops
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Short delay between loops
+      await new Promise(resolve => setTimeout(resolve, 1000));
     } catch (err) {
       console.error('Polling error:', err);
       break;
@@ -304,33 +288,45 @@ async function pollUpdates(env: Env) {
   }
 }
 
-// ---------- Payment Callback ----------
-app.get('/payment/callback', async (c) => {
-  const env = c.env;
-  const userId = c.req.query('user_id');
-  const trackId = c.req.query('track_id');
-  if (!userId || !trackId) return c.text('Missing parameters', 400);
-
-  const verifyResp = await fetch(`https://api.bale.ai/payment/v1/verify/${trackId}`, {
-    headers: { 'Authorization': `Bearer ${env.BALE_PAYMENT_TOKEN}` }
-  });
-  if (!verifyResp.ok) return c.text('Verification failed', 400);
-  const paymentData = await verifyResp.json() as any;
-  if (paymentData.status !== 'PAID') {
-    return c.text('Payment not completed', 200);
+// ---------- Payment Callback (Handles successful payment updates) ----------
+// This handler processes the 'pre_checkout_query' and 'successful_payment' updates.
+// It's integrated into the main polling loop, so no separate HTTP endpoint is needed for verification.
+async function handlePaymentUpdate(env: Env, update: any) {
+  if (update.pre_checkout_query) {
+    const query = update.pre_checkout_query;
+    // Always answer true to proceed with payment
+    await callBaleApi(env, 'answerPreCheckoutQuery', {
+      pre_checkout_query_id: query.id,
+      ok: true
+    });
+    console.log(`Answered pre_checkout_query for user ${query.from.id}`);
   }
 
-  const expiry = Math.floor(Date.now() / 1000) + 30 * 86400;
-  await env.USER_PLANS.put(`premium:${userId}`, 'true');
-  await env.USER_PLANS.put(`expiry:${userId}`, expiry.toString());
+  if (update.message?.successful_payment) {
+    const payment = update.message.successful_payment;
+    const chatId = update.message.chat.id;
+    const payload = payment.invoice_payload; // e.g., "premium_123456"
 
-  await callBaleApi(env, 'sendMessage', {
-    chat_id: parseInt(userId),
-    text: '✅ Payment successful! Your premium subscription is now active for 30 days.'
-  });
+    if (payload && payload.startsWith('premium_')) {
+      const userId = payload.replace('premium_', '');
+      const expiry = Math.floor(Date.now() / 1000) + 30 * 86400;
+      await env.USER_PLANS.put(`premium:${userId}`, 'true');
+      await env.USER_PLANS.put(`expiry:${userId}`, expiry.toString());
 
-  return c.text('OK');
-});
+      await callBaleApi(env, 'sendMessage', {
+        chat_id: parseInt(userId),
+        text: '✅ Payment successful! Your premium subscription is now active for 30 days.'
+      });
+    }
+  }
+}
+
+// Modify the main processUpdate to call handlePaymentUpdate
+const originalProcessUpdate = processUpdate;
+processUpdate = async (env: Env, update: any) => {
+  await handlePaymentUpdate(env, update);
+  await originalProcessUpdate(env, update);
+};
 
 // ---------- Export Handlers ----------
 export default {
@@ -339,9 +335,6 @@ export default {
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === '/payment/callback') {
-      return app.fetch(request, env, ctx);
-    }
     if (url.pathname === '/poll' && request.method === 'GET') {
       await pollUpdates(env);
       return Response.json({ ok: true });
