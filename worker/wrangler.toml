@@ -2,6 +2,13 @@ name = "bale-yt-bot"
 main = "src/worker.ts"
 compatibility_date = "2025-01-01"
 
+# Observability (recommended)
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+
 # Bind KV namespaces – create these in Cloudflare dashboard first
 kv_namespaces = [
   { binding = "BOT_STATE", id = "c14bfe9bf90146208b85e9bd165685c8" },
