@@ -248,7 +248,7 @@ async function pollUpdates(env: Env) {
   let offset = parseInt(await env.BOT_STATE.get(OFFSET_KEY) || '0', 10);
 
   // Loop up to 5 times to process pending updates quickly
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 20; i++) {
     const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/getUpdates`;
     const params = new URLSearchParams({
       offset: offset.toString(),
