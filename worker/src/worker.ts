@@ -1,4 +1,4 @@
-// worker/src/worker.ts - Polling version with callback safety
+// worker/src/worker.ts - Polling version with enhanced safety and logging
 import { Hono } from 'hono';
 
 export interface Env {
@@ -36,6 +36,9 @@ async function callBaleApi(env: Env, method: string, body: any) {
 }
 
 async function triggerWorkflow(env: Env, inputs: Record<string, string>) {
+  if (!env.GITHUB_REPO || typeof env.GITHUB_REPO !== 'string') {
+    throw new Error('GITHUB_REPO is not defined');
+  }
   const [owner, repo] = env.GITHUB_REPO.split('/');
   const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/bot.yml/dispatches`;
   const resp = await fetch(url, {
@@ -70,14 +73,16 @@ function extractYouTubeId(text: string): string | null {
 
 // ---------- Core Update Processor ----------
 async function processUpdate(env: Env, update: any) {
+  console.log('Processing update:', JSON.stringify(update, null, 2));
+
   // Handle callback queries
   if (update.callback_query) {
     const cb = update.callback_query;
-    console.log('Callback query received:', JSON.stringify(cb, null, 2));
-    
     const cbData = cb.data;
     const chatId = cb.message?.chat?.id;
     const callbackId = cb.id;
+
+    console.log(`Callback data type: ${typeof cbData}, value: ${cbData}`);
 
     // Validate required fields
     if (!chatId || !callbackId) {
@@ -85,9 +90,9 @@ async function processUpdate(env: Env, update: any) {
       return;
     }
 
-    // If no callback data, answer with a generic message
-    if (!cbData) {
-      console.warn('Callback query missing "data" field');
+    // If no callback data or not a string, answer with generic message
+    if (!cbData || typeof cbData !== 'string') {
+      console.warn('Callback query missing "data" field or data is not a string');
       await answerCallbackSafe(env, callbackId, 'This button has no action.');
       return;
     }
@@ -257,9 +262,14 @@ async function pollUpdates(env: Env) {
     }
 
     const updates = data.result || [];
+    console.log(`Received ${updates.length} updates`);
     for (const update of updates) {
       offset = Math.max(offset, update.update_id + 1);
-      await processUpdate(env, update);
+      try {
+        await processUpdate(env, update);
+      } catch (err) {
+        console.error('Error processing update:', err, 'Update:', JSON.stringify(update));
+      }
     }
 
     if (updates.length > 0) {
@@ -270,7 +280,7 @@ async function pollUpdates(env: Env) {
   }
 }
 
-// ---------- Payment Callback (still HTTP) ----------
+// ---------- Payment Callback (HTTP) ----------
 app.get('/payment/callback', async (c) => {
   const env = c.env;
   const userId = c.req.query('user_id');
