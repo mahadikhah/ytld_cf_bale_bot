@@ -1,0 +1,64 @@
+name: Bale YouTube Bot Action
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Task to perform'
+        required: true
+        type: choice
+        options:
+          - formats
+          - download
+      chat_id:
+        description: 'Bale chat ID'
+        required: true
+      video_url:
+        description: 'YouTube URL'
+        required: true
+      format_id:
+        description: 'Format ID (for download)'
+        required: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python & dependencies
+        run: |
+          pip install yt-dlp requests
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Setup Deno (required for yt-dlp YouTube extractor)
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+
+      - name: Restore YouTube cookies
+        env:
+          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES }}
+        run: echo "$YOUTUBE_COOKIES_B64" | base64 -d > cookies.txt
+
+      - name: Run bot task
+        env:
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          ACTION: ${{ inputs.action }}
+          CHAT_ID: ${{ inputs.chat_id }}
+          VIDEO_URL: ${{ inputs.video_url }}
+          FORMAT_ID: ${{ inputs.format_id }}
+        run: python bot_action.py
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-logs-${{ github.run_id }}
+          path: |
+            bot.log
+            yt-dlp.log
+          retention-days: 7
