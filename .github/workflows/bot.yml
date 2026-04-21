@@ -70,4 +70,5 @@ jobs:
             bot.log
             yt-dlp.log
             yt-dlp-error.log
+            artifacts/
           retention-days: 7
