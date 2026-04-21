@@ -41,7 +41,7 @@ jobs:
 
       - name: Restore YouTube cookies and validate
         env:
-          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES }}
+          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
         run: |
           echo "$YOUTUBE_COOKIES_B64" | base64 -d > cookies.txt
           echo "=== First 5 lines of cookies.txt ==="
