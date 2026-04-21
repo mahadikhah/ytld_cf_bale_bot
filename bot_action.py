@@ -57,7 +57,11 @@ def get_video_formats(url):
            "--dump-json", url]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise Exception("Failed to get video info")
+        logger.error(f"yt-dlp stderr:\n{result.stderr}")
+        # Also write to a separate file for artifact
+        with open("yt-dlp-error.log", "w") as f:
+            f.write(f"STDERR:\n{result.stderr}\n\nSTDOUT:\n{result.stdout}")
+        raise Exception(f"Failed to get video info. Check yt-dlp-error.log artifact.")
     data = json.loads(result.stdout)
     title = data.get("title", "Unknown")
     duration = data.get("duration", 0)
