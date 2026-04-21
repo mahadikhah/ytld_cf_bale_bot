@@ -65,6 +65,23 @@ async function processUpdate(env: Env, update: any) {
     const chatId = cb.message.chat.id;
     const callbackId = cb.id;
 
+      // Validate required fields
+    if (!chatId || !callbackId) {
+      console.error('Invalid callback_query: missing chatId or callbackId', cb);
+      return;
+    }
+
+      // If no callback data, answer with a generic message
+    if (!cbData) {
+      await callBaleApi(env, 'answerCallbackQuery', {
+        callback_query_id: callbackId,
+        text: 'This button has no action.',
+        show_alert: false
+      });
+      return;
+    }
+
+    
     if (cbData.startsWith('format|')) {
       const [, videoUrl, formatId] = cbData.split('|');
       await callBaleApi(env, 'answerCallbackQuery', {
