@@ -1,5 +1,7 @@
 // worker/src/worker.ts - Polling version
 import { Hono } from 'hono';
+import { decodeURIComponent } from 'worker:url';
+
 
 export interface Env {
   BOT_STATE: KVNamespace;
@@ -11,6 +13,18 @@ export interface Env {
 }
 
 const app = new Hono<{ Bindings: Env }>();
+
+async function answerCallbackSafe(env: Env, callbackId: string, text?: string, showAlert = false) {
+  try {
+    await callBaleApi(env, 'answerCallbackQuery', {
+      callback_query_id: callbackId,
+      text,
+      show_alert: showAlert
+    });
+  } catch (e) {
+    console.warn('answerCallbackQuery failed (may be already answered):', e);
+  }
+}
 
 // ---------- Helpers (same as before) ----------
 async function callBaleApi(env: Env, method: string, body: any) {
@@ -83,21 +97,31 @@ async function processUpdate(env: Env, update: any) {
 
     
     if (cbData.startsWith('format|')) {
-      const [, videoUrl, formatId] = cbData.split('|');
-      await callBaleApi(env, 'answerCallbackQuery', {
-        callback_query_id: callbackId,
-        text: 'Download started...'
-      });
-      await triggerWorkflow(env, {
-        action: 'download',
-        chat_id: chatId.toString(),
-        video_url: videoUrl,
-        format_id: formatId
-      });
-      await callBaleApi(env, 'sendMessage', {
-        chat_id: chatId,
-        text: '⏳ Download queued. You will receive the file shortly.'
-      });
+      const parts = cbData.split('|');
+      if (parts.length < 3) {
+        await answerCallbackSafe(env, callbackId, 'Invalid selection.', true);
+        return;
+      }
+      try {
+        const [, encodedUrl, encodedFormat] = parts;
+        const videoUrl = decodeURIComponent(encodedUrl);
+        const formatId = decodeURIComponent(encodedFormat);
+  
+        await answerCallbackSafe(env, callbackId, 'Download started...');
+        await triggerWorkflow(env, {
+          action: 'download',
+          chat_id: chatId.toString(),
+          video_url: videoUrl,
+          format_id: formatId
+        });
+        await callBaleApi(env, 'sendMessage', {
+          chat_id: chatId,
+          text: '⏳ Download queued. You will receive the file shortly.'
+        });
+      } catch (e) {
+        console.error('Callback processing error:', e);
+        await answerCallbackSafe(env, callbackId, 'Error processing request.', true);
+      }
     } else if (cbData === 'check_premium') {
       const hasPremium = await env.USER_PLANS.get(`premium:${chatId}`) === 'true';
       await callBaleApi(env, 'answerCallbackQuery', {
@@ -105,6 +129,8 @@ async function processUpdate(env: Env, update: any) {
         text: hasPremium ? '✅ You have premium access.' : '❌ No premium subscription found.',
         show_alert: true
       });
+    } else {
+      await answerCallbackSafe(env, callbackId, 'Unknown action.');
     }
     return;
   }
