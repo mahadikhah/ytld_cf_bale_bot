@@ -185,7 +185,7 @@ def main():
             send_message(f"📤 Uploading file ({file_size//1024//1024} MB) in chunks...")
             split_and_send(out_file, f"{video_id}_{FORMAT_ID}")
             send_message("✅ Download complete!")
-            os.remove(out_file)
+            # os.remove(out_file)
             cleanup()
     except Exception as e:
         logger.exception("Action failed")
