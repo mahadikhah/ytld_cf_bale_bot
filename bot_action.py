@@ -145,8 +145,8 @@ def split_and_send(file_path, base_name):
         chunk_size = os.path.getsize(chunk)
         logger.info(f"Sending part {part} ({chunk_size//1024//1024} MB)")
         # if not send_video(chunk):
-          if not send_document(chunk):
-              raise Exception(f"Failed to send part {part}")
+        if not send_document(chunk):
+          raise Exception(f"Failed to send part {part}")
         os.remove(chunk)
         part += 1
         time.sleep(0.5)
