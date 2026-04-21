@@ -11,7 +11,7 @@ VIDEO_URL = os.environ["VIDEO_URL"]
 FORMAT_ID = os.environ.get("FORMAT_ID", "")
 
 TEMP_DIR = "temp_videos"
-MAX_FILE_SIZE = 48 * 1024 * 1024
+MAX_FILE_SIZE = 20 * 1024 * 1024   # 20 MB chunks to be safe (Bale limit 50 MB)
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -41,7 +41,7 @@ def send_document(file_path):
                 logger.info(f"Document sent: {file_path}")
                 return True
             else:
-                logger.error(f"sendDocument failed: {r.status_code} {r.text}")
+                logger.error(f"sendDocument failed: {r.status_code} {r.text[:200]}")
                 return False
     except Exception as e:
         logger.error(f"sendDocument exception: {e}")
@@ -58,7 +58,7 @@ def send_video(file_path):
                 logger.info(f"Video sent: {file_path}")
                 return True
             else:
-                logger.error(f"sendVideo failed: {r.status_code} {r.text}")
+                logger.error(f"sendVideo failed: {r.status_code} {r.text[:200]}")
                 return False
     except Exception as e:
         logger.error(f"sendVideo exception: {e}")
@@ -85,13 +85,15 @@ def get_video_formats(url):
         size = f.get("filesize") or f.get("filesize_approx") or 0
         vcodec = f.get("vcodec", "").split(".")[0]
         format_note = f.get("format_note", "")
-        # Build descriptive label
+        tbr = f.get("tbr")  # bitrate
         label = f"{height}p"
         if format_note and format_note != str(height):
             label += f" {format_note}"
         if vcodec and vcodec not in label:
             label += f" ({vcodec})"
-        if size:
+        if tbr:
+            label += f" ~{tbr:.0f}kbps"
+        elif size:
             label += f" ~{size//1024//1024} MB"
         formats.append({"format_id": f["format_id"], "label": label, "height": height})
     seen = set()
@@ -131,12 +133,15 @@ def split_and_send(file_path, base_name):
     base = os.path.basename(file_path).replace(ext, "")
     pattern = os.path.join(TEMP_DIR, f"{base}_part_%03d{ext}")
     cmd = ["ffmpeg", "-i", file_path, "-c", "copy", "-map", "0", "-f", "segment",
-           "-segment_time", "999999", "-reset_timestamps", "1", "-fs", str(MAX_FILE_SIZE), pattern]
+           "-segment_time", "999999", "-reset_timestamps", "1",
+           "-fs", str(MAX_FILE_SIZE), pattern]
     subprocess.run(cmd, check=True, capture_output=True)
     part = 1
     while True:
         chunk = os.path.join(TEMP_DIR, f"{base}_part_{part:03d}{ext}")
         if not os.path.exists(chunk): break
+        chunk_size = os.path.getsize(chunk)
+        logger.info(f"Sending part {part} ({chunk_size//1024//1024} MB)")
         if not send_document(chunk):
             if not send_video(chunk):
                 raise Exception(f"Failed to send part {part}")
@@ -175,7 +180,7 @@ def main():
             os.makedirs(TEMP_DIR, exist_ok=True)
             download_video(VIDEO_URL, FORMAT_ID, out_file)
             file_size = os.path.getsize(out_file)
-            send_message(f"📤 Uploading file ({file_size//1024//1024} MB)...")
+            send_message(f"📤 Uploading file ({file_size//1024//1024} MB) in chunks...")
             split_and_send(out_file, f"{video_id}_{FORMAT_ID}")
             send_message("✅ Download complete!")
             os.remove(out_file)
