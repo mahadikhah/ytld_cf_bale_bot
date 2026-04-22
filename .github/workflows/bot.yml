@@ -23,13 +23,13 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
 
     steps:
       - uses: actions/checkout@v4
 
-      # Cache Python pip packages
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -38,7 +38,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      # Cache Deno installation
       - name: Cache Deno
         id: cache-deno
         uses: actions/cache@v4
@@ -48,27 +47,35 @@ jobs:
 
       - name: Setup Python & dependencies
         run: |
-          pip install yt-dlp requests
-          sudo apt-get update && sudo apt-get install -y ffmpeg
+          # Install ffmpeg only if missing
+          if ! command -v ffmpeg &> /dev/null; then
+            echo "Installing ffmpeg..."
+            sudo apt-get install -y ffmpeg
+          else
+            echo "ffmpeg already installed"
+          fi
 
-      - name: Setup Deno (required for yt-dlp YouTube extractor)
+          # Install Python packages with retry
+          for i in {1..3}; do
+            echo "Attempt $i: pip install yt-dlp requests"
+            pip install --timeout 60 --retries 3 yt-dlp requests && break || sleep 5
+          done
+
+      - name: Setup Deno (if not cached)
+        if: steps.cache-deno.outputs.cache-hit != 'true'
         run: |
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
 
-      - name: Restore YouTube cookies and validate
+      - name: Add Deno to PATH (if cached)
+        if: steps.cache-deno.outputs.cache-hit == 'true'
+        run: echo "$HOME/.deno/bin" >> $GITHUB_PATH
+
+      - name: Restore YouTube cookies
         env:
-          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
-        run: |
-          echo "$YOUTUBE_COOKIES_B64" | base64 -d > cookies.txt
-          echo "=== First 5 lines of cookies.txt ==="
-          head -n 5 cookies.txt
-          if ! grep -q "# Netscape HTTP Cookie File" cookies.txt; then
-            echo "::error::cookies.txt is not in Netscape format!"
-            exit 1
-          fi
-          echo "Cookies file looks valid."
-          
+          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES }}
+        run: echo "$YOUTUBE_COOKIES_B64" | base64 -d > cookies.txt
+
       - name: Run bot task
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
