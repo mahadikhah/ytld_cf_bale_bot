@@ -233,6 +233,9 @@ def cleanup():
 
 def main():
     logger.info(f"Action: {ACTION} for chat {CHAT_ID}")
+    out_file = None
+    error_occurred = False
+
     try:
         if ACTION == "formats":
             title, duration, formats = get_video_formats(VIDEO_URL)
@@ -280,32 +283,39 @@ def main():
             )
             send_message(success_msg)
             
-            if os.path.exists(out_file):
-                os.remove(out_file)
-            cleanup()
-            
     except Exception as e:
+        error_occurred = True
         logger.exception("Action failed")
         send_message(f"⚠️ Error: {str(e)[:200]}")
-        if 'out_file' in locals() and os.path.exists(out_file):
+        if out_file and os.path.exists(out_file):
             logger.info(f"Saving failed file as artifact: {out_file}")
             os.makedirs("artifacts", exist_ok=True)
             os.rename(out_file, f"artifacts/{os.path.basename(out_file)}")
-        raise
+        # Do NOT re-raise here – let finally block execute and then exit
 
-    # Unlock queue on Cloudflare Worker after successful download
-    worker_url = os.environ.get("WORKER_URL")
-    worker_secret = os.environ.get("WORKER_SECRET")
-    if worker_url and worker_secret and ACTION == "download":
-        try:
-            requests.post(
-                f"{worker_url}/github/done",
-                json={"secret": worker_secret, "chat_id": str(CHAT_ID)},
-                timeout=5
-            )
-            logger.info("Successfully unlocked user queue on Cloudflare Worker.")
-        except Exception as e:
-            logger.error(f"Failed to unlock user queue: {e}")
+    finally:
+        # Clean up temporary files
+        if out_file and os.path.exists(out_file):
+            os.remove(out_file)
+        cleanup()
+
+        # Always unlock the Cloudflare Worker queue for download actions
+        worker_url = os.environ.get("WORKER_URL")
+        worker_secret = os.environ.get("WORKER_SECRET")
+        if worker_url and worker_secret and ACTION == "download":
+            try:
+                requests.post(
+                    f"{worker_url}/github/done",
+                    json={"secret": worker_secret, "chat_id": str(CHAT_ID)},
+                    timeout=5
+                )
+                logger.info("Successfully unlocked user queue on Cloudflare Worker.")
+            except Exception as e:
+                logger.error(f"Failed to unlock user queue: {e}")
+
+        # Exit with non-zero code if an error occurred (optional, for CI/CD)
+        if error_occurred:
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()
