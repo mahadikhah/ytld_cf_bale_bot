@@ -59,6 +59,9 @@ jobs:
           CHAT_ID: ${{ inputs.chat_id }}
           VIDEO_URL: ${{ inputs.video_url }}
           FORMAT_ID: ${{ inputs.format_id }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          
         run: python bot_action.py
 
       - name: Upload logs
