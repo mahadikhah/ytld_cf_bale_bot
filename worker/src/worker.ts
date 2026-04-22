@@ -1,4 +1,4 @@
-// worker/src/worker.ts - Polling with loop, immediate callback answers, and correct payment API
+// worker/src/worker.ts
 import { Hono } from 'hono';
 
 export interface Env {
@@ -8,6 +8,8 @@ export interface Env {
   GITHUB_TOKEN: string;
   GITHUB_REPO: string;
   BALE_PAYMENT_TOKEN: string;
+  ADMIN_CHAT_ID: string;
+  WORKER_SECRET: string; // Secret password for GitHub to unlock the queue
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -19,13 +21,11 @@ async function answerCallbackSafe(env: Env, callbackId: string, text?: string, s
       text,
       show_alert: showAlert
     });
-    console.log('answerCallbackQuery response:', JSON.stringify(result));
   } catch (e) {
     console.error('answerCallbackQuery exception:', e);
   }
 }
 
-// ---------- Helpers ----------
 async function callBaleApi(env: Env, method: string, body: any) {
   const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/${method}`;
   const resp = await fetch(url, {
@@ -34,9 +34,7 @@ async function callBaleApi(env: Env, method: string, body: any) {
     body: JSON.stringify(body)
   });
   const data = await resp.json();
-  if (!resp.ok) {
-    console.error(`Bale API error (${method}):`, resp.status, data);
-  }
+  if (!resp.ok) console.error(`Bale API error (${method}):`, resp.status, data);
   return data;
 }
 
@@ -55,11 +53,7 @@ async function triggerWorkflow(env: Env, inputs: Record<string, string>) {
     },
     body: JSON.stringify({ ref: 'main', inputs })
   });
-  if (!resp.ok) {
-    const err = await resp.text();
-    console.error('GitHub workflow trigger failed:', resp.status, err);
-    throw new Error(`GitHub API error: ${resp.status}`);
-  }
+  if (!resp.ok) throw new Error(`GitHub API error: ${resp.status}`);
   return true;
 }
 
@@ -75,73 +69,69 @@ function extractYouTubeId(text: string): string | null {
   return null;
 }
 
-// ---------- Core Update Processor ----------
-async function processUpdate(env: Env, update: any) {
-  console.log('Processing update:', JSON.stringify(update, null, 2));
+// Authentication Check
+async function hasAccess(env: Env, chatId: string | number): Promise<boolean> {
+  if (env.ADMIN_CHAT_ID && chatId.toString() === env.ADMIN_CHAT_ID) return true;
+  const isPremium = await env.USER_PLANS.get(`premium:${chatId}`);
+  return isPremium === 'true';
+}
 
+async function processUpdate(env: Env, update: any) {
   if (update.callback_query) {
     const cb = update.callback_query;
     const cbData = cb.data;
     const chatId = cb.message?.chat?.id;
     const callbackId = cb.id;
 
-    if (!chatId || !callbackId) {
-      console.error('Invalid callback_query: missing chatId or callbackId', cb);
-      return;
-    }
-
-    if (!cbData || typeof cbData !== 'string') {
-      console.warn('Callback data missing or not string');
-      await answerCallbackSafe(env, callbackId, 'Invalid button.');
-      return;
-    }
+    if (!chatId || !callbackId) return;
 
     if (cbData.startsWith('format|')) {
-      const parts = cbData.split('|');
-      if (parts.length < 3) {
-        await answerCallbackSafe(env, callbackId, 'Invalid format selection.', true);
+      if (!(await hasAccess(env, chatId))) {
+         await answerCallbackSafe(env, callbackId, '🔒 Only premium members can download.', true);
+         return;
+      }
+
+      // Check Queue Lock
+      const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+      if (isQueued === 'true') {
+        await answerCallbackSafe(env, callbackId, '⚠️ You already have a download in progress. Please wait!', true);
         return;
       }
+
+      const parts = cbData.split('|');
+      if (parts.length < 3) return;
+      
       try {
         const [, encodedUrl, encodedFormat] = parts;
-        const videoUrl = decodeURIComponent(encodedUrl);
-        const formatId = decodeURIComponent(encodedFormat);
+        
+        // Lock the queue for this user
+        await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
 
-        // Answer immediately to avoid timeout
         await answerCallbackSafe(env, callbackId, 'Download started...');
         await callBaleApi(env, 'sendMessage', {
           chat_id: chatId,
           text: '⏳ Download queued. You will receive the file shortly.'
         });
 
-        // Trigger workflow (this can take a bit)
         await triggerWorkflow(env, {
           action: 'download',
           chat_id: chatId.toString(),
-          video_url: videoUrl,
-          format_id: formatId
+          video_url: decodeURIComponent(encodedUrl),
+          format_id: decodeURIComponent(encodedFormat)
         });
       } catch (e) {
-        console.error('Callback processing error:', e);
+        // Unlock if GitHub trigger fails
+        await env.USER_PLANS.delete(`dl_queue:${chatId}`);
         await answerCallbackSafe(env, callbackId, 'Error processing request.', true);
       }
     } else if (cbData === 'check_premium') {
-      console.log(`Premium check for chat ${chatId}`);
-      if (!env.USER_PLANS) {
-        console.error('USER_PLANS binding missing');
-        await answerCallbackSafe(env, callbackId, 'Service temporarily unavailable.', true);
-        return;
-      }
-      const hasPremium = await env.USER_PLANS.get(`premium:${chatId}`);
-      const msg = hasPremium === 'true' ? '✅ You have premium access.' : '❌ No premium subscription found.';
+      const access = await hasAccess(env, chatId);
+      const msg = access ? '✅ You have premium/admin access.' : '❌ No premium subscription found.';
       await answerCallbackSafe(env, callbackId, msg, true);
-    } else {
-      await answerCallbackSafe(env, callbackId, 'Unknown action.');
     }
     return;
   }
 
-  // Handle messages
   const message = update.message;
   if (!message?.text) return;
 
@@ -150,38 +140,20 @@ async function processUpdate(env: Env, update: any) {
 
   if (text === '/start') {
     const welcome = `🎬 *YouTube Downloader Bot*\n\nSend me a YouTube link and I'll fetch available qualities.\n\n💎 Premium users get higher priority.\nUse /buy to upgrade.`;
-    const keyboard = {
-      inline_keyboard: [[{ text: '🔍 Check Premium Status', callback_data: 'check_premium' }]]
-    };
     await callBaleApi(env, 'sendMessage', {
       chat_id: chatId,
       text: welcome,
       parse_mode: 'Markdown',
-      reply_markup: keyboard
+      reply_markup: { inline_keyboard: [[{ text: '🔍 Check Premium Status', callback_data: 'check_premium' }]] }
     });
     return;
   }
 
   if (text === '/buy') {
-    const isPremium = await env.USER_PLANS.get(`premium:${chatId}`) === 'true';
-    if (isPremium) {
-      await callBaleApi(env, 'sendMessage', {
-        chat_id: chatId,
-        text: 'You already have an active premium subscription!'
-      });
+    if (await hasAccess(env, chatId)) {
+      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: 'You already have access!' });
       return;
     }
-
-    if (!env.BALE_PAYMENT_TOKEN) {
-      console.error('BALE_PAYMENT_TOKEN missing');
-      await callBaleApi(env, 'sendMessage', {
-        chat_id: chatId,
-        text: '❌ Payment service not configured.'
-      });
-      return;
-    }
-
-    // Use the correct sendInvoice endpoint (bot API, not separate payment API)
     const invoiceData = {
       chat_id: chatId,
       title: 'YouTube Bot Premium',
@@ -189,156 +161,114 @@ async function processUpdate(env: Env, update: any) {
       payload: `premium_${chatId}`,
       provider_token: env.BALE_PAYMENT_TOKEN,
       currency: 'IRR',
-      prices: [{ label: 'Premium 30 days', amount: 1500000 }], // amount in Rials
+      prices: [{ label: 'Premium 30 days', amount: 1500000 }],
     };
-
-    const invoiceResp = await callBaleApi(env, 'sendInvoice', invoiceData);
-
-    if (!invoiceResp.ok) {
-      console.error('Bale invoice creation failed:', invoiceResp);
-      await callBaleApi(env, 'sendMessage', {
-        chat_id: chatId,
-        text: `❌ Payment service temporarily unavailable. Please try later.`
-      });
-      return;
-    }
-    // sendInvoice returns the sent message on success, no need to send another message
-    return;
-  }
-
-  if (text === '/status') {
-    const isPremium = await env.USER_PLANS.get(`premium:${chatId}`) === 'true';
-    const expiry = await env.USER_PLANS.get(`expiry:${chatId}`);
-    let msg = isPremium ? '✅ You have premium access.' : '❌ No premium subscription.';
-    if (expiry) {
-      msg += `\nExpires: ${new Date(parseInt(expiry) * 1000).toLocaleString()}`;
-    }
-    await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: msg });
+    await callBaleApi(env, 'sendInvoice', invoiceData);
     return;
   }
 
   const videoId = extractYouTubeId(text);
   if (videoId) {
-    const videoUrl = `https://youtu.be/${videoId}`;
+    if (!(await hasAccess(env, chatId))) {
+        await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '🔒 Only premium members can fetch videos. Use /buy to upgrade.' });
+        return;
+    }
+    await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '🔍 Fetching available qualities...' });
     await triggerWorkflow(env, {
       action: 'formats',
       chat_id: chatId.toString(),
-      video_url: videoUrl
-    });
-    await callBaleApi(env, 'sendMessage', {
-      chat_id: chatId,
-      text: '🔍 Fetching available qualities...'
+      video_url: `https://youtu.be/${videoId}`
     });
     return;
   }
-
-  await callBaleApi(env, 'sendMessage', {
-    chat_id: chatId,
-    text: 'Please send a valid YouTube URL.'
-  });
 }
 
-// ---------- Polling Function with Fast Loop ----------
-async function pollUpdates(env: Env) {
-  if (!env.BOT_STATE) {
-    console.error('BOT_STATE undefined');
-    return;
-  }
-  const OFFSET_KEY = 'last_update_id';
-  let offset = parseInt(await env.BOT_STATE.get(OFFSET_KEY) || '0', 10);
-
-  // Loop up to 5 times to process pending updates quickly
-  for (let i = 0; i < 15; i++) {
-    const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/getUpdates`;
-    const params = new URLSearchParams({
-      offset: offset.toString(),
-      timeout: '2' // shorter timeout for faster loops
-    });
-
-    try {
-      const resp = await fetch(`${url}?${params}`, { headers: { 'Content-Type': 'application/json' } });
-      const data = await resp.json() as any;
-
-      if (!data.ok) {
-        console.error('getUpdates error:', data);
-        break;
-      }
-
-      const updates = data.result || [];
-      console.log(`Loop ${i+1}: Received ${updates.length} updates`);
-      if (updates.length === 0) break; // no more updates
-
-      for (const update of updates) {
-        offset = Math.max(offset, update.update_id + 1);
-        try {
-          await processUpdate(env, update);
-        } catch (err) {
-          console.error('Error processing update:', err, JSON.stringify(update));
-        }
-      }
-
-      await env.BOT_STATE.put(OFFSET_KEY, offset.toString());
-
-      // Short delay between loops
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    } catch (err) {
-      console.error('Polling error:', err);
-      break;
-    }
-  }
-}
-
-// ---------- Payment Callback (Handles successful payment updates) ----------
-// This handler processes the 'pre_checkout_query' and 'successful_payment' updates.
-// It's integrated into the main polling loop, so no separate HTTP endpoint is needed for verification.
+// Payment Handler
 async function handlePaymentUpdate(env: Env, update: any) {
   if (update.pre_checkout_query) {
-    const query = update.pre_checkout_query;
-    // Always answer true to proceed with payment
-    await callBaleApi(env, 'answerPreCheckoutQuery', {
-      pre_checkout_query_id: query.id,
-      ok: true
-    });
-    console.log(`Answered pre_checkout_query for user ${query.from.id}`);
+    await callBaleApi(env, 'answerPreCheckoutQuery', { pre_checkout_query_id: update.pre_checkout_query.id, ok: true });
   }
-
   if (update.message?.successful_payment) {
-    const payment = update.message.successful_payment;
-    const chatId = update.message.chat.id;
-    const payload = payment.invoice_payload; // e.g., "premium_123456"
-
-    if (payload && payload.startsWith('premium_')) {
+    const payload = update.message.successful_payment.invoice_payload;
+    if (payload?.startsWith('premium_')) {
       const userId = payload.replace('premium_', '');
-      const expiry = Math.floor(Date.now() / 1000) + 30 * 86400;
       await env.USER_PLANS.put(`premium:${userId}`, 'true');
-      await env.USER_PLANS.put(`expiry:${userId}`, expiry.toString());
-
-      await callBaleApi(env, 'sendMessage', {
-        chat_id: parseInt(userId),
-        text: '✅ Payment successful! Your premium subscription is now active for 30 days.'
-      });
+      await callBaleApi(env, 'sendMessage', { chat_id: parseInt(userId), text: '✅ Payment successful! Premium is active.' });
     }
   }
 }
 
-// Modify the main processUpdate to call handlePaymentUpdate
 const originalProcessUpdate = processUpdate;
 processUpdate = async (env: Env, update: any) => {
   await handlePaymentUpdate(env, update);
   await originalProcessUpdate(env, update);
 };
 
-// ---------- Export Handlers ----------
+// Polling loop tightly bound to 50 seconds with a KV Lock
+async function pollUpdates(env: Env) {
+  const LOCK_KEY = 'POLL_LOCK';
+  const now = Date.now();
+  
+  // 1. Check if another instance is already running
+  const activeLock = await env.BOT_STATE.get(LOCK_KEY);
+  if (activeLock && parseInt(activeLock) > now) {
+    console.log('Another instance is polling. Aborting.');
+    return;
+  }
+  
+  // 2. Lock for 55 seconds
+  await env.BOT_STATE.put(LOCK_KEY, (now + 55000).toString());
+
+  const OFFSET_KEY = 'last_update_id';
+  let offset = parseInt(await env.BOT_STATE.get(OFFSET_KEY) || '0', 10);
+  const startTime = Date.now();
+  const MAX_DURATION = 50000; // Run loop for exactly 50 seconds
+
+  while (Date.now() - startTime < MAX_DURATION) {
+    try {
+      const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/getUpdates`;
+      const params = new URLSearchParams({ offset: offset.toString(), timeout: '3' });
+      const resp = await fetch(`${url}?${params}`);
+      const data = await resp.json() as any;
+
+      if (data.ok && data.result) {
+        for (const update of data.result) {
+          offset = Math.max(offset, update.update_id + 1);
+          await processUpdate(env, update);
+        }
+        await env.BOT_STATE.put(OFFSET_KEY, offset.toString());
+      }
+    } catch (err) {
+      console.error('Polling error:', err);
+    }
+  }
+  
+  // 3. Remove lock when 50 seconds are up
+  await env.BOT_STATE.delete(LOCK_KEY);
+}
+
 export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    await pollUpdates(env);
+    ctx.waitUntil(pollUpdates(env));
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === '/poll' && request.method === 'GET') {
-      await pollUpdates(env);
-      return Response.json({ ok: true });
+    
+    // Webhook for GitHub to unlock user queue
+    if (url.pathname === '/github/done' && request.method === 'POST') {
+      const body = await request.json() as any;
+      if (body.secret === env.WORKER_SECRET && body.chat_id) {
+        await env.USER_PLANS.delete(`dl_queue:${body.chat_id}`);
+        return Response.json({ success: true, message: "Queue unlocked" });
+      }
+      return new Response('Unauthorized', { status: 401 });
     }
+
+    if (url.pathname === '/poll' && request.method === 'GET') {
+      ctx.waitUntil(pollUpdates(env));
+      return Response.json({ ok: true, status: "Polling started" });
+    }
+    
     return new Response('Not found', { status: 404 });
   }
 };
