@@ -30,7 +30,6 @@ jobs:
                 BOT_STATE_KV_ID: ${{ secrets.BOT_STATE_KV_ID }}
                 USER_PLANS_KV_ID: ${{ secrets.USER_PLANS_KV_ID }}
               run: |
-                  cp wrangler.template.toml wrangler.toml
                   sed -i "s/__BOT_STATE_KV_ID__/${BOT_STATE_KV_ID}/g" wrangler.toml
                   sed -i "s/__USER_PLANS_KV_ID__/${USER_PLANS_KV_ID}/g" wrangler.toml
                   echo "Generated wrangler.toml:"
