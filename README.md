@@ -19,7 +19,22 @@
 3. **یک ربات Bale** که توکن آن را از [BotFather](https://bale.ai/botfather) دریافت کرده‌اید.
 4. **یک فایل کوکی (cookies.txt) معتبر برای یوتیوب** (اختیاری ولی برای برخی ویدیوها ضروری است).  
    - با افزونه‌هایی مثل "Get cookies.txt LOCALLY" می‌توانید کوکی‌های مرورگر خود را استخراج کنید.
+
+🔗 **مخزن رسمی گیت‌هاب:**  
+[https://github.com/kairi003/Get-cookies.txt-LOCALLY](https://github.com/kairi003/Get-cookies.txt-LOCALLY)
+
+**لینک نصب مستقیم از فروشگاه‌های رسمی:**
+
+- **کروم / اج / بریو:**  
+  [Chrome Web Store - Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)
+
+- **فایرفاکس:**  
+  [Firefox Add-ons - Get cookies.txt LOCALLY](https://addons.mozilla.org/en-US/firefox/addon/get-cookies-txt-locally/)
+
+این افزونه کوکی‌ها را با فرمت استاندارد Netscape (مورد نیاز yt-dlp) ذخیره می‌کند و برخلاف افزونه‌های مشابه، کوکی‌ها را به سرور خارجی ارسال نمی‌کند (کاملاً محلی کار می‌کند).
+
 5. **یک کلاسیک GitHub Personal Access Token (Classic)** با دسترسی `workflow` و `repo`.
+
 6. **شناسه عددی حساب Bale خود** (Chat ID) – می‌توانید از ربات `@userinfobot` در Bale استفاده کنید.
 
 ---
