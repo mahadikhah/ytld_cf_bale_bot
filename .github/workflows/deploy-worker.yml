@@ -32,12 +32,16 @@ jobs:
                   GITHUB_TOKEN: ${{ secrets.ACTION_GITHUB_TOKEN }}               # Personal Access Token for triggering workflows
                   GITHUB_REPO: ${{ secrets.ACTION_GITHUB_REPO }}               # GITHUB REPO for triggering workflows
                   BALE_PAYMENT_TOKEN: ${{ secrets.BALE_PAYMENT_TOKEN }}
+                  ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+                  WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
               run: |
                   # Set each secret via wrangler
                   echo "$BALE_BOT_TOKEN" | npx wrangler secret put BALE_BOT_TOKEN
                   echo "$GITHUB_TOKEN" | npx wrangler secret put GITHUB_TOKEN
                   echo "$GITHUB_REPO" | npx wrangler secret put GITHUB_REPO
                   echo "$BALE_PAYMENT_TOKEN" | npx wrangler secret put BALE_PAYMENT_TOKEN
+                  echo "$ADMIN_CHAT_ID" | npx wrangler secret put ADMIN_CHAT_ID
+                  echo "$WORKER_SECRET" | npx wrangler secret put WORKER_SECRET
 
 
             - name: Deploy to Cloudflare
