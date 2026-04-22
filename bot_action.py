@@ -43,7 +43,6 @@ def send_message(text, reply_markup=None):
         logger.error(f"Send message exception: {e}")
 
 def send_document(file_path):
-    """Send a document (generic file) via multipart/form-data."""
     url = f"{BASE_URL}/sendDocument"
     try:
         with open(file_path, "rb") as f:
@@ -61,7 +60,6 @@ def send_document(file_path):
         return False
 
 def ensure_mp4(file_path):
-    """Check if file is a valid MP4; if not, attempt to remux with ffmpeg."""
     if file_path.lower().endswith('.mp4'):
         cmd = ["ffprobe", "-v", "error", "-show_entries", "format=format_name", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -74,6 +72,23 @@ def ensure_mp4(file_path):
     os.remove(file_path)
     os.rename(new_path, file_path)
     return file_path
+
+def get_clean_title(url):
+    """Fetches the video title and removes illegal filename characters."""
+    cmd = [
+        "yt-dlp", "--cookies", "cookies.txt",
+        "--remote-components", "ejs:github",
+        "--no-check-certificates",
+        "--print", "title", url
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0 and result.stdout.strip():
+        title = result.stdout.strip()
+        # Strip illegal characters for OS file naming
+        clean = re.sub(r'[\\/*?:"<>|]', "", title)
+        # Limit length to 45 chars to prevent OS path length limits
+        return clean[:45].strip()
+    return "Video"
 
 def get_video_formats(url):
     cmd = [
@@ -89,6 +104,7 @@ def get_video_formats(url):
         with open("yt-dlp-error.log", "w") as f:
             f.write(f"STDERR:\n{result.stderr}\n\nSTDOUT:\n{result.stdout}")
         raise Exception("Failed to get video info. Check yt-dlp-error.log artifact.")
+    
     data = json.loads(result.stdout)
     title = data.get("title", "Unknown")
     duration = data.get("duration", 0)
@@ -126,7 +142,6 @@ def get_video_formats(url):
     seen_keys = set()
     unique = []
     for f in formats:
-        # Group duplicates by resolution and approx megabyte size
         size_mb = f["size"] // 1024 // 1024
         unique_key = f"{f['height']}_{size_mb}"
         
@@ -172,7 +187,6 @@ def split_and_send(file_path, base_name):
     
     chunk_size_mb = MAX_FILE_SIZE // (1024 * 1024)
     
-    # Run 'zip' from inside the target directory so internal paths stay flat
     cmd = [
         "zip", "-s", f"{chunk_size_mb}m",
         zip_base_name,
@@ -183,15 +197,13 @@ def split_and_send(file_path, base_name):
     result = subprocess.run(cmd, cwd=file_dir, capture_output=True, text=True)
     if result.returncode != 0:
         logger.error(f"Zip failed: {result.stderr}")
-        raise Exception("Failed to create zip archives. Ensure the 'zip' utility is installed on your system.")
+        raise Exception("Failed to create zip archives. Ensure 'zip' is installed.")
 
-    # Find all generated multi-part zip files (.z01, .z02... and .zip)
     split_files = []
     for f in os.listdir(file_dir):
         if f.startswith(base_name) and (f.endswith('.zip') or re.search(r'\.z\d+$', f)):
             split_files.append(os.path.join(file_dir, f))
             
-    # Sort them accurately so .z01 comes first, and the main .zip comes last
     def sort_parts(filepath):
         ext = os.path.splitext(filepath)[1].lower()
         if ext == '.zip':
@@ -242,18 +254,31 @@ def main():
         elif ACTION == "download":
             if not FORMAT_ID:
                 raise ValueError("Missing format_id")
-            send_message("⏳ Downloading and processing video...")
-            video_id = re.search(r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})', VIDEO_URL)
-            video_id = video_id.group(1) if video_id else "video"
-            out_file = os.path.join(TEMP_DIR, f"{video_id}_{FORMAT_ID}.mp4")
+            
+            send_message("⏳ Fetching video details and starting download...")
+            
+            # Fetch the title and clean it for safe file naming
+            clean_title = get_clean_title(VIDEO_URL)
+            base_name = f"{clean_title}_{FORMAT_ID}"
+            
+            out_file = os.path.join(TEMP_DIR, f"{base_name}.mp4")
             os.makedirs(TEMP_DIR, exist_ok=True)
             
             download_video(VIDEO_URL, FORMAT_ID, out_file)
             file_size = os.path.getsize(out_file)
             
-            send_message(f"📤 Uploading file ({file_size//1024//1024} MB) as a multi-part zip...")
-            split_and_send(out_file, f"{video_id}_{FORMAT_ID}")
-            send_message("✅ Download complete! Make sure to download all parts to the same folder and extract the final .zip file.")
+            send_message(f"📤 Uploading **{clean_title}** ({file_size//1024//1024} MB) as a multi-part zip...")
+            split_and_send(out_file, base_name)
+            
+            # Send a user-friendly instruction message on how to handle the files
+            success_msg = (
+                "✅ Download complete!\n\n"
+                "**How to open your video:**\n"
+                "1. Download all the parts (`.z01`, `.z02`... and `.zip`) into the *same folder*.\n"
+                "2. Open/Extract ONLY the final `.zip` file.\n"
+                "3. Your system will automatically pull the pieces together to rebuild the full `.mp4` video."
+            )
+            send_message(success_msg)
             
             if os.path.exists(out_file):
                 os.remove(out_file)
