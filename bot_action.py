@@ -293,5 +293,23 @@ def main():
             os.rename(out_file, f"artifacts/{os.path.basename(out_file)}")
         raise
 
+    worker_url = os.environ("WORKER_URL")
+    worker_secret = os.environ("WORKER_SECRET")
+    if worker_url and worker_secret and action == "download"
+        try:
+            requests.post(
+                f"{worker_url}/github/done",
+                json = {"secret":worker_secret , "chat_id":str(CHAT_ID)},
+                timout = 5 
+            )
+
+            logger.info(
+                "successfully unlocked user queue on cloudflare worker ."
+            )
+        except Exception as e :
+          logger.error(
+              f"Failed to unlock user queue : {e}"
+          )  
+
 if __name__ == "__main__":
     main()
