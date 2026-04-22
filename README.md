@@ -32,9 +32,7 @@
   [Firefox Add-ons - Get cookies.txt LOCALLY](https://addons.mozilla.org/en-US/firefox/addon/get-cookies-txt-locally/)
 
 این افزونه کوکی‌ها را با فرمت استاندارد Netscape (مورد نیاز yt-dlp) ذخیره می‌کند و برخلاف افزونه‌های مشابه، کوکی‌ها را به سرور خارجی ارسال نمی‌کند (کاملاً محلی کار می‌کند).
-
 5. **یک کلاسیک GitHub Personal Access Token (Classic)** با دسترسی `workflow` و `repo`.
-
 6. **شناسه عددی حساب Bale خود** (Chat ID) – می‌توانید از ربات `@userinfobot` در Bale استفاده کنید.
 
 ---
