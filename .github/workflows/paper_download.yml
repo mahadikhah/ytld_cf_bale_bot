@@ -1,4 +1,4 @@
-name: Paper Download (Bash only)
+name: Paper Download (Bash only, quick fail)
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ on:
 jobs:
   download-and-send:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5   # short timeout – no long waits
 
     steps:
       - name: Download PDF
@@ -24,7 +24,7 @@ jobs:
           echo "Downloading ${{ inputs.paper_url }}"
           curl -L -o paper.pdf "${{ inputs.paper_url }}"
 
-      - name: Check size and send
+      - name: Quick send (1-2 tries) or notify
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
@@ -33,33 +33,70 @@ jobs:
           WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
         run: |
           FILE_SIZE=$(stat -c%s paper.pdf)
-          MAX_SIZE=$((20 * 1024 * 1024))   # 20 MB
+          MAX_SIZE=$((20 * 1024 * 1024))
           SAFE_TITLE=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-45)
 
+          send_message() {
+            curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$1\", \"parse_mode\": \"Markdown\"}"
+          }
+
+          # Returns 0 on success, 1 on failure (after at most 2 attempts)
+          try_upload() {
+            local file="$1"
+            local caption="$2"
+            for attempt in 1 2; do
+              if [ -n "$caption" ]; then
+                RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" \
+                           -F "caption=$caption" \
+                           "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+              else
+                RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" \
+                           "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+              fi
+              HTTP_CODE=$(echo "$RESPONSE" | tail -c 4)
+              BODY=$(echo "$RESPONSE" | head -c -4)
+
+              if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then
+                echo "Upload succeeded on attempt $attempt"
+                return 0
+              fi
+              # minimal sleep only if there will be a second attempt
+              if [ $attempt -lt 2 ]; then
+                sleep 1
+              fi
+            done
+            return 1
+          }
+
           if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
-            echo "File size $(($FILE_SIZE / 1024 / 1024)) MB – sending directly"
-            curl -s -F "document=@paper.pdf" \
-                 -F "caption=$SAFE_TITLE" \
-                 "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}"
+            echo "File size $(($FILE_SIZE / 1024 / 1024)) MB – direct send"
+            if try_upload "paper.pdf" "$SAFE_TITLE"; then
+              echo "Sent successfully"
+            else
+              echo "Direct send failed – notifying user"
+              send_message "❌ Bale is currently unstable and cannot receive files. Please try again later or download the paper manually."
+              exit 0
+            fi
           else
             echo "File too large – splitting into 15 MB chunks"
-            # Create split zip archive (produces paper.z01, paper.z02 ... paper.zip)
             zip -s 15m paper.zip paper.pdf
             PARTS=$(ls paper.z* paper.zip 2>/dev/null | sort -V)
             PART_COUNT=$(echo "$PARTS" | wc -l)
             PART_NUM=1
             for part in $PARTS; do
               echo "Sending part $PART_NUM/$PART_COUNT: $part"
-              curl -s -F "document=@$part" \
-                   "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}"
+              if ! try_upload "$part"; then
+                echo "Failed to send part $PART_NUM"
+                send_message "❌ Bale is currently unstable – file delivery interrupted. Please try again later."
+                exit 0
+              fi
               PART_NUM=$((PART_NUM + 1))
               sleep 1
             done
-            # Send instructions
-            INSTR="✅ Download complete!\n\n**How to open your paper:**\n1. Download all parts to the same folder.\n2. Open/extract ONLY the 'paper.zip' file.\n3. Your system will reassemble the PDF automatically."
-            curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
-                 -H "Content-Type: application/json" \
-                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$INSTR\", \"parse_mode\": \"Markdown\"}"
+            INSTR="✅ Download complete!\n\n**How to open your paper:**\n1. Download all parts to the same folder.\n2. Extract ONLY the 'paper.zip' file.\n3. It will reassemble the PDF automatically."
+            send_message "$INSTR"
           fi
 
       - name: Unlock worker queue
