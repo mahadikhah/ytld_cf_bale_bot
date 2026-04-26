@@ -238,12 +238,12 @@ async function pollUpdates(env: Env) {
   }
   
   // 2. Lock for 55 seconds
-  await env.BOT_STATE.put(LOCK_KEY, (now + 55000).toString());
+  await env.BOT_STATE.put(LOCK_KEY, (now + 295000).toString());
 
   const OFFSET_KEY = 'last_update_id';
   let offset = parseInt(await env.BOT_STATE.get(OFFSET_KEY) || '0', 10);
   const startTime = Date.now();
-  const MAX_DURATION = 50000; // Run loop for exactly 50 seconds
+  const MAX_DURATION = 295000; // Run loop for exactly 50 seconds
 
   while (Date.now() - startTime < MAX_DURATION) {
     try {
