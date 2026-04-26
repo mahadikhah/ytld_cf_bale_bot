@@ -1,13 +1,14 @@
 // worker/src/search.ts
 // ======================================
-//  YOUTUBE SEARCH – NO API KEYS
+//  YOUTUBE & WEB SEARCH – NO API KEYS
 // ======================================
 
 const YT_MAX_RESULTS = 10;
-const YT_USER_AGENT = "Mozilla/5.0 (compatible; BaleYouTubeBot/1.0)";
+const BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36";
 
 // ---------------- Markdown escaping ----------------
 function escapeMarkdown(text: string): string {
+  if (!text) return "";
   return text
     .replace(/\\/g, "\\\\")
     .replace(/\*/g, "\\*")
@@ -27,7 +28,7 @@ export interface YtResult {
   duration: string;
   published: string;
   thumb: string;
-  channel: string;          // ← NEW
+  channel: string;
 }
 
 export interface YtPage {
@@ -36,192 +37,137 @@ export interface YtPage {
 }
 
 // ============================================
-//  fetchYtPage – robust token extraction
+//  fetchYtPage – using Internal Innertube API
 // ============================================
 export async function fetchYtPage(
   query: string,
   filter: "relevance" | "date",
   continuationToken?: string
 ): Promise<YtPage> {
-  let url: string;
+  const url = "https://www.youtube.com/youtubei/v1/search?prettyPrint=false";
+  
+  // YouTube Web Client Context
+  const body: any = {
+    context: {
+      client: {
+        clientName: "WEB",
+        clientVersion: "2.20240105.01.00",
+        hl: "en",
+        gl: "US"
+      }
+    }
+  };
 
+  // Configure payload for Initial Query vs Pagination Continuation
   if (continuationToken) {
-    url = `https://www.youtube.com/browse_ajax?ctoken=${encodeURIComponent(continuationToken)}`;
+    body.continuation = continuationToken;
   } else {
-    const params = new URLSearchParams({ search_query: query });
+    body.query = query;
     if (filter === "date") {
-      params.set("sp", "CAI=");   // "CAI%3D" after encoding
-    }
-    url = `https://www.youtube.com/results?${params.toString()}`;
-  }
-
-  const resp = await fetch(url, {
-    headers: { "User-Agent": YT_USER_AGENT },
-  });
-  const rawText = await resp.text();
-
-  // ----- 1. Extract JSON data -----
-  let data: any;
-  if (continuationToken) {
-    try {
-      data = JSON.parse(rawText);
-    } catch {
-      const jsonMatch = rawText.match(/\{.*\}/s);
-      if (!jsonMatch) {
-        console.log("YT continuation: no JSON");
-        return { results: [], nextToken: null };
-      }
-      data = JSON.parse(jsonMatch[0]);
-    }
-  } else {
-    const match = rawText.match(
-      /var ytInitialData\s*=\s*(\{.*?\});\s*<\/script>/s
-    );
-    if (!match) {
-      console.log("YT search: ytInitialData missing");
-      return { results: [], nextToken: null };
-    }
-    data = JSON.parse(match[1]);
-  }
-
-  // ----- 2. Get continuation token (NEXT PAGE) -----
-  let nextToken: string | null = null;
-
-  if (continuationToken) {
-    // continuation response: token is in the JSON
-    const cont = data?.continuationContents?.itemSectionContinuation;
-    if (cont) {
-      nextToken = cont.continuations?.[0]?.nextContinuationData?.continuation ?? null;
-    } else {
-      nextToken = data?.continuations?.[0]?.nextContinuationData?.continuation ?? null;
-    }
-  } else {
-    // FIRST PAGE – token is embedded in ytInitialData JSON string.
-    // We grab it with a simple regex (avoids all the structure issues).
-    const tokenMatch = rawText.match(/"token":"([^"]+)"/);
-    if (tokenMatch) {
-      // There may be multiple tokens; the first one belonging to
-      // a continuationCommand is the pagination token.
-      // We'll use the very first token found – it's almost always the main one.
-      nextToken = tokenMatch[1];
-      console.log("Extracted next token via regex:", nextToken);
-    } else {
-      console.log("No token found via regex");
-      // Fallback: try the structural way just in case
-      const primary = data?.contents?.twoColumnSearchResultsRenderer?.primaryContents;
-      const sectionList = primary?.sectionListRenderer;
-      if (sectionList) {
-        nextToken =
-          sectionList.continuations?.[0]?.nextContinuationData?.continuation ?? null;
-        if (!nextToken) {
-          const itemSection = sectionList.contents?.[0]?.itemSectionRenderer;
-          if (itemSection) {
-            nextToken =
-              itemSection.continuations?.[0]?.nextContinuationData?.continuation ?? null;
-            if (!nextToken) {
-              const last = itemSection.contents?.[itemSection.contents.length - 1];
-              nextToken =
-                last?.continuationItemRenderer?.continuationEndpoint
-                  ?.continuationCommand?.token ?? null;
-            }
-          }
-        }
-      }
+      body.params = "CAI%3D"; // Standard Innertube base64 filter param for "Upload Date"
     }
   }
 
-  // ----- 3. Extract video items -----
-  let items: any[] = [];
-  if (continuationToken) {
-    const cont = data?.continuationContents?.itemSectionContinuation;
-    items = cont?.contents ?? data?.contents ?? [];
-  } else {
-    const primary = data?.contents?.twoColumnSearchResultsRenderer?.primaryContents;
-    const itemSection = primary?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer;
-    items = itemSection?.contents ?? [];
-  }
-
-  // ----- 4. Build results -----
-  const results: YtResult[] = [];
-  for (const item of items) {
-    const vr = item.videoRenderer;
-    if (!vr) continue;
-
-    const videoId = vr.videoId;
-    if (!videoId) continue;
-
-    const titleRaw = vr.title?.runs?.[0]?.text || "Untitled";
-
-    // Duration
-    let duration = "";
-    if (vr.lengthText?.simpleText) {
-      duration = vr.lengthText.simpleText;
-    } else if (vr.lengthText?.accessibility?.accessibilityData?.label) {
-      duration = vr.lengthText.accessibility.accessibilityData.label
-        .replace(/^.*?: /, "")
-        .trim();
-    }
-
-    // Published date
-    let published = "";
-    if (vr.publishedTimeText?.simpleText) {
-      published = vr.publishedTimeText.simpleText;
-    }
-
-    // Thumbnail (fallback to i.ytimg.com)
-    let thumb = "";
-    const thumbs = vr.thumbnail?.thumbnails;
-    if (thumbs && thumbs.length > 0) {
-      thumb = thumbs[thumbs.length - 1].url;
-    } else {
-      thumb = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
-    }
-
-    // Channel / author name
-    let channel = "";
-    // Try shortBylineText (e.g., "Channel Name" · "Views")
-    if (vr.shortBylineText?.runs?.[0]?.text) {
-      channel = vr.shortBylineText.runs[0].text;
-    } else if (vr.ownerText?.runs?.[0]?.text) {
-      channel = vr.ownerText.runs[0].text;
-    } else if (vr.longBylineText?.runs?.[0]?.text) {
-      channel = vr.longBylineText.runs[0].text;
-    }
-
-    results.push({
-      title: titleRaw,
-      videoId,
-      duration,
-      published,
-      thumb,
-      channel,
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": BROWSER_USER_AGENT
+      },
+      body: JSON.stringify(body)
     });
 
-    if (results.length >= YT_MAX_RESULTS) break;
+    if (!resp.ok) {
+        console.error("YouTube API failed with status:", resp.status);
+        return { results: [], nextToken: null };
+    }
+
+    const data = await resp.json() as any;
+    let items: any[] = [];
+    let nextToken: string | null = null;
+
+    // ----- Extract Continuation JSON properly -----
+    if (continuationToken) {
+      const actions = data.onResponseReceivedCommands || [];
+      for (const action of actions) {
+        const contItems = action.appendContinuationItemsAction?.continuationItems || [];
+        for (const item of contItems) {
+            // Find Video Results
+            if (item.itemSectionRenderer?.contents) {
+                items.push(...item.itemSectionRenderer.contents);
+                const token = item.itemSectionRenderer.continuations?.[0]?.nextContinuationData?.continuation;
+                if (token) nextToken = token;
+            } 
+            // Find Pagination Token
+            else if (item.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token) {
+                nextToken = item.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
+            }
+        }
+      }
+    } else {
+    // ----- Extract Initial Page JSON properly -----
+      const primary = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer;
+      if (primary) {
+        for (const content of primary.contents || []) {
+          if (content.itemSectionRenderer?.contents) {
+            items.push(...content.itemSectionRenderer.contents);
+          }
+        }
+        nextToken = primary.continuations?.[0]?.nextContinuationData?.continuation || null;
+      }
+    }
+
+    // ----- Build Results -----
+    const results: YtResult[] = [];
+    for (const item of items) {
+      const vr = item.videoRenderer;
+      if (!vr || !vr.videoId) continue;
+
+      const videoId = vr.videoId;
+      const titleRaw = vr.title?.runs?.[0]?.text || "Untitled";
+
+      let duration = "";
+      if (vr.lengthText?.simpleText) {
+        duration = vr.lengthText.simpleText;
+      } else if (vr.lengthText?.accessibility?.accessibilityData?.label) {
+        duration = vr.lengthText.accessibility.accessibilityData.label.replace(/^.*?: /, "").trim();
+      }
+
+      let published = vr.publishedTimeText?.simpleText || "";
+      let channel = vr.ownerText?.runs?.[0]?.text || vr.shortBylineText?.runs?.[0]?.text || "";
+      
+      const thumbs = vr.thumbnail?.thumbnails;
+      const thumb = (thumbs && thumbs.length > 0) ? thumbs[thumbs.length - 1].url : `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+
+      results.push({
+        title: titleRaw,
+        videoId,
+        duration,
+        published,
+        thumb,
+        channel,
+      });
+
+      if (results.length >= YT_MAX_RESULTS) break;
+    }
+
+    return { results, nextToken };
+  } catch (error) {
+    console.error("fetchYtPage error:", error);
+    return { results: [], nextToken: null };
   }
-
-  console.log(
-    `YT page (${filter}, cont: ${!!continuationToken}):`,
-    results.map((r) => r.title).slice(0, 3),
-    "nextToken exists:",
-    !!nextToken
-  );
-
-  return { results, nextToken };
 }
 
 // ============================================
-//  buildYtMessage – now shows channel name
+//  buildYtMessage
 // ============================================
-export function buildYtMessage(page: YtPage): {
-  text: string;
-  keyboard: any[][];
-} {
+export function buildYtMessage(page: YtPage): { text: string; keyboard: any[][] } {
   let text = "🎬 *YouTube results:*\n\n";
   const keyboard: any[][] = [];
 
   if (page.results.length === 0) {
-    text = "No more video results.";
+    text = "⚠️ No more video results found.";
     return { text, keyboard };
   }
 
@@ -229,7 +175,7 @@ export function buildYtMessage(page: YtPage): {
     const idx = i + 1;
     const title = escapeMarkdown(r.title);
     const details: string[] = [];
-    if (r.channel) details.push(`👤 ${r.channel}`);
+    if (r.channel) details.push(`👤 ${escapeMarkdown(r.channel)}`);
     if (r.published) details.push(`📅 ${r.published}`);
     if (r.duration) details.push(`⏱ ${r.duration}`);
 
@@ -238,30 +184,18 @@ export function buildYtMessage(page: YtPage): {
     text += "\n";
 
     keyboard.push([
-      {
-        text: `▶️ ${idx}. Download`,
-        callback_data: `ytdl|${r.videoId}`,
-      },
-      {
-        text: `🖼️ Thumb`,
-        callback_data: `thumb|${r.videoId}`,
-      },
+      { text: `▶️ ${idx}. Download`, callback_data: `ytdl|${r.videoId}` },
+      { text: `🖼️ Thumb`, callback_data: `thumb|${r.videoId}` },
     ]);
   });
 
   if (page.nextToken) {
-    keyboard.push([
-      {
-        text: "Next ➡️",
-        callback_data: `yt_next|${page.nextToken}`,
-      },
-    ]);
+    keyboard.push([{ text: "Next Page ➡️", callback_data: `yt_next|${page.nextToken}` }]);
   }
 
   return { text, keyboard };
 }
 
-// Convenience export
 export async function searchYouTube(
   query: string,
   filter: "relevance" | "date" = "relevance",
@@ -271,16 +205,92 @@ export async function searchYouTube(
 }
 
 // ============================================
-//  WEB SEARCH – DuckDuckGo Instant Answer + SearXNG
+//  WEB SEARCH – Multi-Layered Fallback System
 // ============================================
 
+// Strategy 1: DuckDuckGo HTML POST (Bypasses Cloudflare block easily)
+async function tryDuckDuckGoHTMLPost(query: string): Promise<string | null> {
+    try {
+      const resp = await fetch("https://html.duckduckgo.com/html/", {
+        method: "POST",
+        headers: {
+          "User-Agent": BROWSER_USER_AGENT,
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: `q=${encodeURIComponent(query)}&b=`
+      });
+      const html = await resp.text();
+      
+      const regex = /<h2 class="result__title">\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gi;
+      let match;
+      const results: {title: string, url: string}[] = [];
+      
+      while ((match = regex.exec(html)) !== null) {
+        let link = match[1];
+        // Decode DDG secure redirects
+        if (link.includes("uddg=")) {
+          const urlMatch = link.match(/uddg=([^&]+)/);
+          if (urlMatch) link = decodeURIComponent(urlMatch[1]);
+        } else if (link.startsWith("//")) {
+           link = "https:" + link;
+        }
+        
+        const title = match[2].replace(/<[^>]+>/g, "").replace(/&[a-z]+;/g, "").trim();
+        results.push({ title, url: link });
+        if (results.length >= 6) break;
+      }
+      
+      if (results.length > 0) {
+        let output = "*Web results (DuckDuckGo):*\n\n";
+        results.forEach(r => { output += `🌐 [${escapeMarkdown(r.title)}](${r.url})\n\n`; });
+        return output;
+      }
+    } catch(e) {
+      console.log("DDG HTML POST error:", e);
+    }
+    return null;
+}
+
+// Strategy 2: Bing Scraper (Very lenient towards Workers)
+async function tryBingSearch(query: string): Promise<string | null> {
+    try {
+      const resp = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}`, {
+        headers: { "User-Agent": BROWSER_USER_AGENT }
+      });
+      const html = await resp.text();
+      
+      const regex = /<h2><a href="([^"]+)"[^>]*>(.*?)<\/a><\/h2>/gi;
+      let match;
+      const results: {title: string, url: string}[] = [];
+      
+      while ((match = regex.exec(html)) !== null) {
+        const link = match[1];
+        // Filter out internal Microsoft UI links
+        if (link.startsWith("http") && !link.includes("microsoft.com")) {
+          const title = match[2].replace(/<[^>]+>/g, "").replace(/&[a-z]+;/g, "").trim();
+          results.push({ title, url: link });
+          if (results.length >= 6) break;
+        }
+      }
+      
+      if (results.length > 0) {
+        let output = "*Web results (Bing):*\n\n";
+        results.forEach(r => { output += `🌐 [${escapeMarkdown(r.title)}](${r.url})\n\n`; });
+        return output;
+      }
+    } catch (e) {
+      console.log("Bing Scraper error:", e);
+    }
+    return null;
+}
+
+// Strategy 3: SearXNG Array (Updated List)
 const SEARX_INSTANCES = [
-  "https://search.sapti.me",
-  "https://searx.tiekoetter.com",
   "https://searx.be",
-  "https://search.bus-hit.me",
-  "https://searx.tux.computer",
-  "https://searx.fmac.xyz",
+  "https://search.sapti.me",
+  "https://searx.work",
+  "https://paulgo.io",
+  "https://search.mdosch.de",
 ];
 
 async function trySearXNG(query: string): Promise<string | null> {
@@ -288,145 +298,50 @@ async function trySearXNG(query: string): Promise<string | null> {
     try {
       const url = `${base}/search?q=${encodeURIComponent(query)}&format=json`;
       const resp = await fetch(url, {
-        headers: { "User-Agent": YT_USER_AGENT },
+        headers: { "User-Agent": BROWSER_USER_AGENT },
       });
-      if (!resp.ok) {
-        console.log(`SearXNG ${base} status ${resp.status}`);
-        continue;
-      }
-      // Some instances may return HTML error pages, so check content-type
+      if (!resp.ok) continue;
+
       const contentType = resp.headers.get("content-type") || "";
-      if (!contentType.includes("application/json")) {
-        console.log(`SearXNG ${base} non-JSON response`);
-        continue;
-      }
+      if (!contentType.includes("application/json")) continue;
+      
       const json: any = await resp.json();
       const results = json.results ?? [];
+      
       if (results.length > 0) {
-        console.log(`SearXNG (${base}) found ${results.length} results`);
-        let output = "*Web results:*\n\n";
+        let output = "*Web results (SearXNG):*\n\n";
         let count = 0;
         for (const r of results) {
           if (!r.url || !r.title) continue;
           output += `🌐 [${escapeMarkdown(r.title)}](${r.url})\n\n`;
           count++;
-          if (count >= 5) break;
+          if (count >= 6) break;
         }
         return output;
       }
     } catch (e) {
-      console.log(`SearXNG ${base} error:`, e);
+      // Instance failed, move to next
     }
   }
   return null;
 }
 
-async function tryDuckDuckGoInstantAnswer(query: string): Promise<string | null> {
-  try {
-    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-    const resp = await fetch(url, { headers: { "User-Agent": YT_USER_AGENT } });
-    if (!resp.ok) return null;
-    const json: any = await resp.json();
-    const related: any[] = json.RelatedTopics ?? [];
-    const results: { title: string; url: string }[] = [];
-    for (const topic of related) {
-      if (topic.FirstURL && topic.Text) {
-        // Text may contain HTML; strip it
-        const title = topic.Text.replace(/<[^>]+>/g, "").trim();
-        results.push({ title, url: topic.FirstURL });
-        if (results.length >= 5) break;
-      }
-    }
-    if (results.length > 0) {
-      console.log("DDG Instant Answer found", results.length, "related topics");
-      let output = "*Web results:*\n\n";
-      for (const r of results) {
-        output += `🌐 [${escapeMarkdown(r.title)}](${r.url})\n\n`;
-      }
-      return output;
-    }
-  } catch (e) {
-    console.log("DDG Instant Answer error:", e);
-  }
-  return null;
-}
-
-function parseDuckDuckGoLiteHtml(html: string): { title: string; url: string }[] {
-  const results: { title: string; url: string }[] = [];
-  // Pattern for lite.duckduckgo.com
-  const liteRegex = /<a[^>]*class="[^"]*result-link[^"]*"[^>]*href="([^"]*)"[^>]*>(.*?)<\/a>/gi;
-  let match;
-  while ((match = liteRegex.exec(html)) !== null) {
-    let link = match[1];
-    const title = match[2].replace(/<[^>]+>/g, "").trim();
-    if (!link.startsWith("http")) link = "https:" + link;
-    results.push({ title, url: link });
-    if (results.length >= 5) break;
-  }
-  if (results.length === 0) {
-    // Fallback class name (old HTML version)
-    const oldRegex = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"[^>]*>(.*?)<\/a>/gi;
-    while ((match = oldRegex.exec(html)) !== null) {
-      let link = match[1];
-      const title = match[2].replace(/<[^>]+>/g, "").trim();
-      if (!link.startsWith("http")) link = "https:" + link;
-      results.push({ title, url: link });
-      if (results.length >= 5) break;
-    }
-  }
-  return results;
-}
-
+// ----------------------------------------------------
+// Main Web Search Exporter
+// ----------------------------------------------------
 export async function searchWeb(query: string): Promise<string> {
-  // 1) DuckDuckGo Lite
-  const liteUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
-  try {
-    const resp = await fetch(liteUrl, {
-      headers: { "User-Agent": YT_USER_AGENT },
-    });
-    const html = await resp.text();
-    console.log("DDG Lite snippet:", html.slice(0, 200));
-    const results = parseDuckDuckGoLiteHtml(html);
-    if (results.length > 0) {
-      console.log("DDG Lite found", results.length, "results");
-      let output = "*Web results:*\n\n";
-      results.forEach(r => {
-        output += `🌐 [${escapeMarkdown(r.title)}](${r.url})\n\n`;
-      });
-      return output;
-    }
-  } catch (e) {
-    console.log("DDG Lite error:", e);
-  }
+    
+  // 1. Try DuckDuckGo Post (High Success Rate)
+  const ddgResult = await tryDuckDuckGoHTMLPost(query);
+  if (ddgResult) return ddgResult;
 
-  // 2) DuckDuckGo Instant Answer API
-  const instantResult = await tryDuckDuckGoInstantAnswer(query);
-  if (instantResult) return instantResult;
+  // 2. Try Bing (High Success Rate)
+  const bingResult = await tryBingSearch(query);
+  if (bingResult) return bingResult;
 
-  // 3) DuckDuckGo HTML (old)
-  const htmlUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  try {
-    const resp = await fetch(htmlUrl, {
-      headers: { "User-Agent": YT_USER_AGENT },
-    });
-    const html = await resp.text();
-    console.log("DDG HTML snippet:", html.slice(0, 200));
-    const results = parseDuckDuckGoLiteHtml(html);
-    if (results.length > 0) {
-      console.log("DDG HTML found", results.length, "results");
-      let output = "*Web results:*\n\n";
-      results.forEach(r => {
-        output += `🌐 [${escapeMarkdown(r.title)}](${r.url})\n\n`;
-      });
-      return output;
-    }
-  } catch (e) {
-    console.log("DDG HTML error:", e);
-  }
-
-  // 4) SearXNG rotation
+  // 3. Try SearXNG Public rotation
   const searxResult = await trySearXNG(query);
   if (searxResult) return searxResult;
 
-  return "No web results found.";
+  return "⚠️ No web results found. The search engines might be temporarily blocking our requests.";
 }
