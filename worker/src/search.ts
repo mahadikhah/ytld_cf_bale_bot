@@ -56,6 +56,7 @@ export async function fetchYtPage(
   continuationToken?: string
 ): Promise<YtPage> {
   const url = "https://www.youtube.com/youtubei/v1/search?prettyPrint=false";
+  console.log(`[YouTube] Fetching query: '${query}', token: ${!!continuationToken}`);
   
   const body: any = {
     context: {
@@ -88,7 +89,7 @@ export async function fetchYtPage(
     });
 
     if (!resp.ok) {
-        console.error("YouTube API failed with status:", resp.status);
+        console.error(`[YouTube] API failed with status: ${resp.status}`);
         return { results: [], nextToken: null };
     }
 
@@ -154,10 +155,11 @@ export async function fetchYtPage(
 
       if (results.length >= YT_MAX_RESULTS) break;
     }
-
+    
+    console.log(`[YouTube] Found ${results.length} results. Has Next: ${!!nextToken}`);
     return { results, nextToken };
   } catch (error) {
-    console.error("fetchYtPage error:", error);
+    console.error("[YouTube] fetchYtPage error:", error);
     return { results: [], nextToken: null };
   }
 }
@@ -209,7 +211,7 @@ export async function searchYouTube(
 
 
 // ============================================
-//  WEB SEARCH – Details & Pagination
+//  WEB SEARCH – Details, Pagination & Logs
 // ============================================
 
 export function buildWebMessage(pageData: WebPage, currentPage: number): { text: string, keyboard: any[][] } {
@@ -217,7 +219,7 @@ export function buildWebMessage(pageData: WebPage, currentPage: number): { text:
   const keyboard: any[][] = [];
 
   if (pageData.results.length === 0) {
-      text += "⚠️ No results found.";
+      text += "⚠️ No results found. Check worker logs if this persists.";
       return { text, keyboard };
   }
 
@@ -243,6 +245,52 @@ export function buildWebMessage(pageData: WebPage, currentPage: number): { text:
   return { text, keyboard };
 }
 
+// Strategy 1: DuckDuckGo HTML POST (Extremely reliable for Page 1, hard to block)
+async function tryDuckDuckGoHTMLPost(query: string): Promise<WebPage | null> {
+    console.log(`[WebSearch: DDG] Attempting HTML POST for: ${query}`);
+    try {
+      const resp = await fetch("https://html.duckduckgo.com/html/", {
+        method: "POST",
+        headers: {
+          "User-Agent": BROWSER_USER_AGENT,
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: `q=${encodeURIComponent(query)}&b=`
+      });
+      const html = await resp.text();
+      console.log(`[WebSearch: DDG] Response length: ${html.length} bytes`);
+      
+      const results: WebResult[] = [];
+      const resultRegex = /<div class="result__body">.*?<h2 class="result__title">.*?<a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>.*?<a class="result__snippet[^>]*>(.*?)<\/a>/gis;
+      
+      let match;
+      while ((match = resultRegex.exec(html)) !== null) {
+        let link = match[1];
+        if (link.includes("uddg=")) {
+          const urlMatch = link.match(/uddg=([^&]+)/);
+          if (urlMatch) link = decodeURIComponent(urlMatch[1]);
+        } else if (link.startsWith("//")) {
+           link = "https:" + link;
+        }
+        
+        const title = match[2].replace(/<[^>]+>/g, "").replace(/&[a-z]+;/g, "").trim();
+        const snippet = match[3].replace(/<[^>]+>/g, "").replace(/&[a-z]+;/g, "").trim();
+        
+        results.push({ title, url: link, snippet });
+        if (results.length >= 10) break;
+      }
+      
+      console.log(`[WebSearch: DDG] Found ${results.length} results.`);
+      if (results.length > 0) {
+        return { results, hasNext: true }; // Assume true for DDG fallback to engine 2 for page 2
+      }
+    } catch(e) {
+      console.error("[WebSearch: DDG] HTML POST error:", e);
+    }
+    return null;
+}
+
+// Strategy 2: SearXNG instances
 const SEARX_INSTANCES = [
   "https://searx.be",
   "https://search.sapti.me",
@@ -252,17 +300,27 @@ const SEARX_INSTANCES = [
 ];
 
 async function trySearXNG(query: string, page: number): Promise<WebPage | null> {
+  console.log(`[WebSearch: SearXNG] Starting search for page ${page}`);
   for (const base of SEARX_INSTANCES) {
     try {
       const url = `${base}/search?q=${encodeURIComponent(query)}&format=json&pageno=${page}`;
+      console.log(`[WebSearch: SearXNG] Trying instance: ${base}`);
+      
       const resp = await fetch(url, { headers: { "User-Agent": BROWSER_USER_AGENT } });
-      if (!resp.ok) continue;
+      if (!resp.ok) {
+          console.log(`[WebSearch: SearXNG] ${base} returned status ${resp.status}`);
+          continue;
+      }
 
       const contentType = resp.headers.get("content-type") || "";
-      if (!contentType.includes("application/json")) continue;
+      if (!contentType.includes("application/json")) {
+          console.log(`[WebSearch: SearXNG] ${base} returned non-JSON (likely Captcha or block)`);
+          continue;
+      }
       
       const json: any = await resp.json();
       const items = json.results ?? [];
+      console.log(`[WebSearch: SearXNG] ${base} returned ${items.length} items`);
       
       if (items.length > 0) {
         const results: WebResult[] = [];
@@ -277,20 +335,23 @@ async function trySearXNG(query: string, page: number): Promise<WebPage | null> 
         }
         return { results, hasNext: items.length >= 8 };
       }
-    } catch (e) {
-      // Move to next instance
+    } catch (e: any) {
+      console.error(`[WebSearch: SearXNG] Instance ${base} threw error:`, e.message);
     }
   }
   return null;
 }
 
+// Strategy 3: Bing Scraper 
 async function tryBingSearch(query: string, page: number): Promise<WebPage | null> {
+  console.log(`[WebSearch: Bing] Starting search for page ${page}`);
   try {
     const first = (page - 1) * 10 + 1;
     const resp = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&first=${first}`, {
       headers: { "User-Agent": BROWSER_USER_AGENT, "Accept-Language": "en-US,en;q=0.9" }
     });
     const html = await resp.text();
+    console.log(`[WebSearch: Bing] HTML response size: ${html.length} bytes`);
     
     const results: WebResult[] = [];
     const liRegex = /<li class="b_algo"(.*?)<\/li>/gis;
@@ -316,23 +377,44 @@ async function tryBingSearch(query: string, page: number): Promise<WebPage | nul
       if (results.length >= 10) break;
     }
     
+    console.log(`[WebSearch: Bing] Parsed ${results.length} valid results`);
     if (results.length > 0) {
        return { results, hasNext: results.length >= 8 };
+    } else {
+        console.log("[WebSearch: Bing] Found 0 results. Bing might be serving a captcha.");
     }
-  } catch (e) {
-    console.log("Bing Scraper error:", e);
+  } catch (e: any) {
+    console.error("[WebSearch: Bing] Scraper threw error:", e.message);
   }
   return null;
 }
 
 export async function searchWeb(query: string, page: number = 1): Promise<WebPage> {
-  // Try SearXNG Public rotation first for easiest JSON & snippets
+  console.log(`\n--- NEW WEB SEARCH REQUEST: '${query}' | PAGE: ${page} ---`);
+
+  // Try DuckDuckGo first for initial queries (highest reliability on CF Workers)
+  if (page === 1) {
+      const ddgResult = await tryDuckDuckGoHTMLPost(query);
+      if (ddgResult && ddgResult.results.length > 0) {
+          console.log("[WebSearch] Fulfilled by DuckDuckGo HTML");
+          return ddgResult;
+      }
+  }
+
+  // Fallback 1: SearXNG Instances (Better for pages > 1 because they handle JSON pagination cleanly)
   const searxResult = await trySearXNG(query, page);
-  if (searxResult && searxResult.results.length > 0) return searxResult;
+  if (searxResult && searxResult.results.length > 0) {
+      console.log("[WebSearch] Fulfilled by SearXNG");
+      return searxResult;
+  }
 
-  // Fallback to Bing scraper
+  // Fallback 2: Bing Scraper
   const bingResult = await tryBingSearch(query, page);
-  if (bingResult && bingResult.results.length > 0) return bingResult;
+  if (bingResult && bingResult.results.length > 0) {
+      console.log("[WebSearch] Fulfilled by Bing");
+      return bingResult;
+  }
 
+  console.warn(`[WebSearch] All engines failed for query '${query}' on page ${page}`);
   return { results: [], hasNext: false };
 }
