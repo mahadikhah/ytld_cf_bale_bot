@@ -1,6 +1,6 @@
 // worker/src/search.ts
 // ======================================
-//  YOUTUBE & WEB SEARCH – NO API KEYS
+//  YOUTUBE SEARCH – NO API KEYS
 // ======================================
 
 const YT_MAX_RESULTS = 10;
@@ -27,6 +27,7 @@ export interface YtResult {
   duration: string;
   published: string;
   thumb: string;
+  channel: string;          // ← NEW
 }
 
 export interface YtPage {
@@ -35,7 +36,7 @@ export interface YtPage {
 }
 
 // ============================================
-//  fetchYtPage
+//  fetchYtPage – robust token extraction
 // ============================================
 export async function fetchYtPage(
   query: string,
@@ -49,7 +50,7 @@ export async function fetchYtPage(
   } else {
     const params = new URLSearchParams({ search_query: query });
     if (filter === "date") {
-      params.set("sp", "CAI=");   // encode will turn '=' into %3D
+      params.set("sp", "CAI=");   // "CAI%3D" after encoding
     }
     url = `https://www.youtube.com/results?${params.toString()}`;
   }
@@ -57,15 +58,15 @@ export async function fetchYtPage(
   const resp = await fetch(url, {
     headers: { "User-Agent": YT_USER_AGENT },
   });
-  const text = await resp.text();
+  const rawText = await resp.text();
 
+  // ----- 1. Extract JSON data -----
   let data: any;
-
   if (continuationToken) {
     try {
-      data = JSON.parse(text);
+      data = JSON.parse(rawText);
     } catch {
-      const jsonMatch = text.match(/\{.*\}/s);
+      const jsonMatch = rawText.match(/\{.*\}/s);
       if (!jsonMatch) {
         console.log("YT continuation: no JSON");
         return { results: [], nextToken: null };
@@ -73,7 +74,7 @@ export async function fetchYtPage(
       data = JSON.parse(jsonMatch[0]);
     }
   } else {
-    const match = text.match(
+    const match = rawText.match(
       /var ytInitialData\s*=\s*(\{.*?\});\s*<\/script>/s
     );
     if (!match) {
@@ -83,73 +84,75 @@ export async function fetchYtPage(
     data = JSON.parse(match[1]);
   }
 
-  // ----- Extract items + continuation token -----
-  let items: any[] = [];
+  // ----- 2. Get continuation token (NEXT PAGE) -----
   let nextToken: string | null = null;
 
   if (continuationToken) {
+    // continuation response: token is in the JSON
     const cont = data?.continuationContents?.itemSectionContinuation;
     if (cont) {
-      items = cont.contents ?? [];
       nextToken = cont.continuations?.[0]?.nextContinuationData?.continuation ?? null;
     } else {
-      items = data?.contents ?? [];
       nextToken = data?.continuations?.[0]?.nextContinuationData?.continuation ?? null;
     }
   } else {
-    const primary =
-      data?.contents?.twoColumnSearchResultsRenderer?.primaryContents;
-    const sectionList = primary?.sectionListRenderer;
-
-    // 1) Check sectionList-level continuations (this is often where the token sits)
-    if (sectionList) {
-      nextToken =
-        sectionList.continuations?.[0]?.nextContinuationData?.continuation ?? null;
-    }
-
-    // 2) Dive into the first itemSection
-    const itemSection = sectionList?.contents?.[0]?.itemSectionRenderer;
-    if (itemSection) {
-      const itsItems = itemSection.contents ?? [];
-      items = itsItems;
-
-      // 3) Check itemSection-level continuations (sometimes duplicative, but safe)
-      const localToken =
-        itemSection.continuations?.[0]?.nextContinuationData?.continuation;
-      if (localToken) nextToken = localToken;
-
-      // 4) Check last item for a continuationItemRenderer
-      if (!nextToken && items.length > 0) {
-        const last = items[items.length - 1];
-        const ctoken =
-          last?.continuationItemRenderer?.continuationEndpoint
-            ?.continuationCommand?.token;
-        if (ctoken) nextToken = ctoken;
+    // FIRST PAGE – token is embedded in ytInitialData JSON string.
+    // We grab it with a simple regex (avoids all the structure issues).
+    const tokenMatch = rawText.match(/"token":"([^"]+)"/);
+    if (tokenMatch) {
+      // There may be multiple tokens; the first one belonging to
+      // a continuationCommand is the pagination token.
+      // We'll use the very first token found – it's almost always the main one.
+      nextToken = tokenMatch[1];
+      console.log("Extracted next token via regex:", nextToken);
+    } else {
+      console.log("No token found via regex");
+      // Fallback: try the structural way just in case
+      const primary = data?.contents?.twoColumnSearchResultsRenderer?.primaryContents;
+      const sectionList = primary?.sectionListRenderer;
+      if (sectionList) {
+        nextToken =
+          sectionList.continuations?.[0]?.nextContinuationData?.continuation ?? null;
+        if (!nextToken) {
+          const itemSection = sectionList.contents?.[0]?.itemSectionRenderer;
+          if (itemSection) {
+            nextToken =
+              itemSection.continuations?.[0]?.nextContinuationData?.continuation ?? null;
+            if (!nextToken) {
+              const last = itemSection.contents?.[itemSection.contents.length - 1];
+              nextToken =
+                last?.continuationItemRenderer?.continuationEndpoint
+                  ?.continuationCommand?.token ?? null;
+            }
+          }
+        }
       }
     }
-
-    // DEBUG: log the keys that *could* hold the token
-    console.log(
-      "YT token debug:",
-      "sectionList.continuations:",
-      !!sectionList?.continuations,
-      "itemSection.continuations:",
-      !!itemSection?.continuations,
-      "last item type:",
-      items.length ? Object.keys(items[items.length - 1])[0] : "none"
-    );
   }
 
-  // ----- Build results -----
+  // ----- 3. Extract video items -----
+  let items: any[] = [];
+  if (continuationToken) {
+    const cont = data?.continuationContents?.itemSectionContinuation;
+    items = cont?.contents ?? data?.contents ?? [];
+  } else {
+    const primary = data?.contents?.twoColumnSearchResultsRenderer?.primaryContents;
+    const itemSection = primary?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer;
+    items = itemSection?.contents ?? [];
+  }
+
+  // ----- 4. Build results -----
   const results: YtResult[] = [];
   for (const item of items) {
     const vr = item.videoRenderer;
     if (!vr) continue;
+
     const videoId = vr.videoId;
     if (!videoId) continue;
 
     const titleRaw = vr.title?.runs?.[0]?.text || "Untitled";
 
+    // Duration
     let duration = "";
     if (vr.lengthText?.simpleText) {
       duration = vr.lengthText.simpleText;
@@ -159,11 +162,13 @@ export async function fetchYtPage(
         .trim();
     }
 
+    // Published date
     let published = "";
     if (vr.publishedTimeText?.simpleText) {
       published = vr.publishedTimeText.simpleText;
     }
 
+    // Thumbnail (fallback to i.ytimg.com)
     let thumb = "";
     const thumbs = vr.thumbnail?.thumbnails;
     if (thumbs && thumbs.length > 0) {
@@ -172,7 +177,26 @@ export async function fetchYtPage(
       thumb = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
     }
 
-    results.push({ title: titleRaw, videoId, duration, published, thumb });
+    // Channel / author name
+    let channel = "";
+    // Try shortBylineText (e.g., "Channel Name" · "Views")
+    if (vr.shortBylineText?.runs?.[0]?.text) {
+      channel = vr.shortBylineText.runs[0].text;
+    } else if (vr.ownerText?.runs?.[0]?.text) {
+      channel = vr.ownerText.runs[0].text;
+    } else if (vr.longBylineText?.runs?.[0]?.text) {
+      channel = vr.longBylineText.runs[0].text;
+    }
+
+    results.push({
+      title: titleRaw,
+      videoId,
+      duration,
+      published,
+      thumb,
+      channel,
+    });
+
     if (results.length >= YT_MAX_RESULTS) break;
   }
 
@@ -187,7 +211,7 @@ export async function fetchYtPage(
 }
 
 // ============================================
-//  buildYtMessage
+//  buildYtMessage – now shows channel name
 // ============================================
 export function buildYtMessage(page: YtPage): {
   text: string;
@@ -205,6 +229,7 @@ export function buildYtMessage(page: YtPage): {
     const idx = i + 1;
     const title = escapeMarkdown(r.title);
     const details: string[] = [];
+    if (r.channel) details.push(`👤 ${r.channel}`);
     if (r.published) details.push(`📅 ${r.published}`);
     if (r.duration) details.push(`⏱ ${r.duration}`);
 
@@ -236,6 +261,7 @@ export function buildYtMessage(page: YtPage): {
   return { text, keyboard };
 }
 
+// Convenience export
 export async function searchYouTube(
   query: string,
   filter: "relevance" | "date" = "relevance",
