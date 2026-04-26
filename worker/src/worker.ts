@@ -15,7 +15,7 @@ export interface Env {
 
 const app = new Hono<{ Bindings: Env }>();
 
-// ------------------ HELPERS (unchanged) ------------------
+// ------------------ HELPERS ------------------
 async function answerCallbackSafe(env: Env, callbackId: string, text?: string, showAlert = false) {
   try {
     await callBaleApi(env, 'answerCallbackQuery', {
@@ -77,7 +77,7 @@ async function hasAccess(env: Env, chatId: string | number): Promise<boolean> {
   return isPremium === 'true';
 }
 
-// ------------------ MAIN UPDATE PROCESSOR (unchanged) ------------------
+// ------------------ MAIN UPDATE PROCESSOR ------------------
 async function processUpdate(env: Env, update: any) {
   if (update.callback_query) {
     const cb = update.callback_query;
@@ -124,11 +124,10 @@ async function processUpdate(env: Env, update: any) {
       }
       return;
     } 
-          // ---------- Handle "Download" button ----------
+    
+    // ---------- Handle "Download" button ----------
     if (cbData.startsWith("ytdl|")) {
         const videoId = cbData.split("|")[1];
-        // Send a message to the chat containing the YouTube link,
-        // which will be processed as a regular download request.
         await callBaleApi(env, "sendMessage", {
           chat_id: chatId,
           text: `https://youtu.be/${videoId}`,
@@ -137,7 +136,7 @@ async function processUpdate(env: Env, update: any) {
         return;
     }
 
-      // ---------- Handle "Thumbnail" button ----------
+    // ---------- Handle "Thumbnail" button ----------
     if (cbData.startsWith("thumb|")) {
         const videoId = cbData.split("|")[1];
         const thumbUrl = `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
@@ -150,20 +149,18 @@ async function processUpdate(env: Env, update: any) {
         return;
     }
 
-      // ---------- Handle "Next page" button ----------
+    // ---------- Handle "Next page" button ----------
     if (cbData.startsWith("yt_next|")) {
         const nextToken = cbData.substring(8);
-        // Retrieve the stored query & filter from KV (we'll set them when the first page was sent)
         const queryKey = `yt_query:${chatId}`;
         const filterKey = `yt_filter:${chatId}`;
         const originalQuery = await env.BOT_STATE.get(queryKey);
-        const originalFilter =
-          (await env.BOT_STATE.get(filterKey)) as "relevance" | "date" | null;
+        const originalFilter = (await env.BOT_STATE.get(filterKey)) as "relevance" | "date" | null;
 
         if (!originalQuery) {
           await answerCallbackSafe(env, callbackId, "Search session expired.", true);
           return;
-      }
+        }
 
         const page = await searchYouTube(
           originalQuery,
@@ -172,7 +169,6 @@ async function processUpdate(env: Env, update: any) {
         );
         const { text: messageText, keyboard } = buildYtMessage(page);
 
-        // Update the same message (we need the message_id; stored in cb.message.message_id)
         await callBaleApi(env, "editMessageText", {
           chat_id: chatId,
           message_id: cb.message.message_id,
@@ -244,11 +240,11 @@ async function processUpdate(env: Env, update: any) {
     const query = text.slice(8).trim();
     if (query) {
       const result = await searchWeb(query);
-      console.log("/search output (first 200 chars):", result.slice(0, 200));
       await callBaleApi(env, "sendMessage", {
         chat_id: chatId,
         text: result,
         parse_mode: "Markdown",
+        disable_web_page_preview: true
       });
     }
     return;
@@ -274,14 +270,8 @@ async function processUpdate(env: Env, update: any) {
     const page = await searchYouTube(query, filter);
     const { text: messageText, keyboard } = buildYtMessage(page);
 
-    console.log("/ysearch output (first 200 chars):", messageText.slice(0, 200));
-
     await env.BOT_STATE.put(`yt_query:${chatId}`, query, { expirationTtl: 300 });
-    await env.BOT_STATE.put(
-          `yt_filter:${chatId}`,
-          filter,
-        { expirationTtl: 300 }
-    );
+    await env.BOT_STATE.put(`yt_filter:${chatId}`, filter, { expirationTtl: 300 });
     
     await callBaleApi(env, "sendMessage", {
       chat_id: chatId,
@@ -309,7 +299,7 @@ async function processUpdate(env: Env, update: any) {
   }
 }
 
-// ------------------ PAYMENT HANDLER (unchanged) ------------------
+// ------------------ PAYMENT HANDLER ------------------
 async function handlePaymentUpdate(env: Env, update: any) {
   if (update.pre_checkout_query) {
     await callBaleApi(env, 'answerPreCheckoutQuery', { pre_checkout_query_id: update.pre_checkout_query.id, ok: true });
@@ -319,7 +309,6 @@ async function handlePaymentUpdate(env: Env, update: any) {
     const payload = update.message.successful_payment.invoice_payload;
     if (payload?.startsWith('premium_')) {
       const userId = payload.replace('premium_', '');
-      
       const expiry = Math.floor(Date.now() / 1000) + 30 * 86400; 
       
       await env.USER_PLANS.put(`premium:${userId}`, 'true');
@@ -330,21 +319,19 @@ async function handlePaymentUpdate(env: Env, update: any) {
   }
 }
 
-// Wrap processUpdate with payment handling
-const originalProcessUpdate = processUpdate;
-processUpdate = async (env: Env, update: any) => {
+let wrappedProcessUpdate = async (env: Env, update: any) => {
   await handlePaymentUpdate(env, update);
-  await originalProcessUpdate(env, update);
+  await processUpdate(env, update);
 };
 
 // -------------------------------------------------------
-//  OPTIMIZED POLLING — 110s loop, no lock, 1 write/run
+//  OPTIMIZED POLLING 
 // -------------------------------------------------------
 async function pollUpdates(env: Env) {
   const OFFSET_KEY = 'last_update_id';
   let offset = parseInt(await env.BOT_STATE.get(OFFSET_KEY) || '0', 10);
   
-  const MAX_DURATION = 170_000; // 110 seconds – only 10s gap until next cron
+  const MAX_DURATION = 170_000;
   const startTime = Date.now();
 
   while (Date.now() - startTime < MAX_DURATION) {
@@ -357,32 +344,27 @@ async function pollUpdates(env: Env) {
       if (data.ok && data.result) {
         for (const update of data.result) {
           offset = Math.max(offset, update.update_id + 1);
-          await processUpdate(env, update);
+          await wrappedProcessUpdate(env, update);
         }
       }
     } catch (err) {
       console.error('Polling error:', err);
-      // small delay to avoid tight error loops
       await new Promise(r => setTimeout(r, 1000));
     }
   }
 
-  // Save offset exactly once — now 720 writes/day
   await env.BOT_STATE.put(OFFSET_KEY, offset.toString());
 }
 
 // -------------------------------------------------------
-//  WORKER EXPORT — no /poll, no lock
+//  WORKER EXPORT
 // -------------------------------------------------------
 export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Cron every 2 minutes guarantees only one instance runs (110s < 120s)
     ctx.waitUntil(pollUpdates(env));
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    
-    // Keep only the GitHub webhook
     if (url.pathname === '/github/done' && request.method === 'POST') {
       const body = await request.json() as any;
       if (body.secret === env.WORKER_SECRET && body.chat_id) {
@@ -391,8 +373,6 @@ export default {
       }
       return new Response('Unauthorized', { status: 401 });
     }
-    
-    // Everything else is blocked
     return new Response('Not found', { status: 404 });
   }
 };
