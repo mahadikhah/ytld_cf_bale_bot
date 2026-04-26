@@ -36,6 +36,17 @@ export interface YtPage {
   nextToken: string | null;
 }
 
+export interface WebResult {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+export interface WebPage {
+  results: WebResult[];
+  hasNext: boolean;
+}
+
 // ============================================
 //  fetchYtPage – using Internal Innertube API
 // ============================================
@@ -46,7 +57,6 @@ export async function fetchYtPage(
 ): Promise<YtPage> {
   const url = "https://www.youtube.com/youtubei/v1/search?prettyPrint=false";
   
-  // YouTube Web Client Context
   const body: any = {
     context: {
       client: {
@@ -58,13 +68,12 @@ export async function fetchYtPage(
     }
   };
 
-  // Configure payload for Initial Query vs Pagination Continuation
   if (continuationToken) {
     body.continuation = continuationToken;
   } else {
     body.query = query;
     if (filter === "date") {
-      body.params = "CAI%3D"; // Standard Innertube base64 filter param for "Upload Date"
+      body.params = "CAI%3D"; 
     }
   }
 
@@ -87,26 +96,21 @@ export async function fetchYtPage(
     let items: any[] = [];
     let nextToken: string | null = null;
 
-    // ----- Extract Continuation JSON properly -----
     if (continuationToken) {
       const actions = data.onResponseReceivedCommands || [];
       for (const action of actions) {
         const contItems = action.appendContinuationItemsAction?.continuationItems || [];
         for (const item of contItems) {
-            // Find Video Results
             if (item.itemSectionRenderer?.contents) {
                 items.push(...item.itemSectionRenderer.contents);
                 const token = item.itemSectionRenderer.continuations?.[0]?.nextContinuationData?.continuation;
                 if (token) nextToken = token;
-            } 
-            // Find Pagination Token
-            else if (item.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token) {
+            } else if (item.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token) {
                 nextToken = item.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
             }
         }
       }
     } else {
-    // ----- Extract Initial Page JSON properly -----
       const primary = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer;
       if (primary) {
         for (const content of primary.contents || []) {
@@ -118,7 +122,6 @@ export async function fetchYtPage(
       }
     }
 
-    // ----- Build Results -----
     const results: YtResult[] = [];
     for (const item of items) {
       const vr = item.videoRenderer;
@@ -162,7 +165,7 @@ export async function fetchYtPage(
 // ============================================
 //  buildYtMessage
 // ============================================
-export function buildYtMessage(page: YtPage): { text: string; keyboard: any[][] } {
+export function buildYtMessage(page: YtPage, pageId: string): { text: string; keyboard: any[][] } {
   let text = "🎬 *YouTube results:*\n\n";
   const keyboard: any[][] = [];
 
@@ -189,8 +192,8 @@ export function buildYtMessage(page: YtPage): { text: string; keyboard: any[][] 
     ]);
   });
 
-  if (page.nextToken) {
-    keyboard.push([{ text: "Next Page ➡️", callback_data: `yt_next|${page.nextToken}` }]);
+  if (pageId && page.nextToken) {
+    keyboard.push([{ text: "Next Page ➡️", callback_data: `yt_next|${pageId}` }]);
   }
 
   return { text, keyboard };
@@ -204,87 +207,42 @@ export async function searchYouTube(
   return fetchYtPage(query, filter, nextToken);
 }
 
+
 // ============================================
-//  WEB SEARCH – Multi-Layered Fallback System
+//  WEB SEARCH – Details & Pagination
 // ============================================
 
-// Strategy 1: DuckDuckGo HTML POST (Bypasses Cloudflare block easily)
-async function tryDuckDuckGoHTMLPost(query: string): Promise<string | null> {
-    try {
-      const resp = await fetch("https://html.duckduckgo.com/html/", {
-        method: "POST",
-        headers: {
-          "User-Agent": BROWSER_USER_AGENT,
-          "Content-Type": "application/x-www-form-urlencoded"
-        },
-        body: `q=${encodeURIComponent(query)}&b=`
-      });
-      const html = await resp.text();
-      
-      const regex = /<h2 class="result__title">\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gi;
-      let match;
-      const results: {title: string, url: string}[] = [];
-      
-      while ((match = regex.exec(html)) !== null) {
-        let link = match[1];
-        // Decode DDG secure redirects
-        if (link.includes("uddg=")) {
-          const urlMatch = link.match(/uddg=([^&]+)/);
-          if (urlMatch) link = decodeURIComponent(urlMatch[1]);
-        } else if (link.startsWith("//")) {
-           link = "https:" + link;
-        }
-        
-        const title = match[2].replace(/<[^>]+>/g, "").replace(/&[a-z]+;/g, "").trim();
-        results.push({ title, url: link });
-        if (results.length >= 6) break;
+export function buildWebMessage(pageData: WebPage, currentPage: number): { text: string, keyboard: any[][] } {
+  let text = `🔍 *Web Search Results (Page ${currentPage})*\n\n`;
+  const keyboard: any[][] = [];
+
+  if (pageData.results.length === 0) {
+      text += "⚠️ No results found.";
+      return { text, keyboard };
+  }
+
+  pageData.results.forEach((r, i) => {
+      const idx = (currentPage - 1) * 10 + i + 1;
+      text += `${idx}\\. 🌐 *[${escapeMarkdown(r.title)}](${r.url})*\n`;
+      if (r.snippet) {
+          const snippetStr = r.snippet.length > 200 ? r.snippet.substring(0, 200) + "..." : r.snippet;
+          text += `_${escapeMarkdown(snippetStr)}_\n`;
       }
-      
-      if (results.length > 0) {
-        let output = "*Web results (DuckDuckGo):*\n\n";
-        results.forEach(r => { output += `🌐 [${escapeMarkdown(r.title)}](${r.url})\n\n`; });
-        return output;
-      }
-    } catch(e) {
-      console.log("DDG HTML POST error:", e);
-    }
-    return null;
+      text += "\n";
+  });
+
+  const navRow = [];
+  if (currentPage > 1) {
+      navRow.push({ text: "⬅️ Prev", callback_data: `web_next|${currentPage - 1}` });
+  }
+  if (pageData.hasNext) {
+      navRow.push({ text: "Next ➡️", callback_data: `web_next|${currentPage + 1}` });
+  }
+  if (navRow.length > 0) keyboard.push(navRow);
+
+  return { text, keyboard };
 }
 
-// Strategy 2: Bing Scraper (Very lenient towards Workers)
-async function tryBingSearch(query: string): Promise<string | null> {
-    try {
-      const resp = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}`, {
-        headers: { "User-Agent": BROWSER_USER_AGENT }
-      });
-      const html = await resp.text();
-      
-      const regex = /<h2><a href="([^"]+)"[^>]*>(.*?)<\/a><\/h2>/gi;
-      let match;
-      const results: {title: string, url: string}[] = [];
-      
-      while ((match = regex.exec(html)) !== null) {
-        const link = match[1];
-        // Filter out internal Microsoft UI links
-        if (link.startsWith("http") && !link.includes("microsoft.com")) {
-          const title = match[2].replace(/<[^>]+>/g, "").replace(/&[a-z]+;/g, "").trim();
-          results.push({ title, url: link });
-          if (results.length >= 6) break;
-        }
-      }
-      
-      if (results.length > 0) {
-        let output = "*Web results (Bing):*\n\n";
-        results.forEach(r => { output += `🌐 [${escapeMarkdown(r.title)}](${r.url})\n\n`; });
-        return output;
-      }
-    } catch (e) {
-      console.log("Bing Scraper error:", e);
-    }
-    return null;
-}
-
-// Strategy 3: SearXNG Array (Updated List)
 const SEARX_INSTANCES = [
   "https://searx.be",
   "https://search.sapti.me",
@@ -293,55 +251,88 @@ const SEARX_INSTANCES = [
   "https://search.mdosch.de",
 ];
 
-async function trySearXNG(query: string): Promise<string | null> {
+async function trySearXNG(query: string, page: number): Promise<WebPage | null> {
   for (const base of SEARX_INSTANCES) {
     try {
-      const url = `${base}/search?q=${encodeURIComponent(query)}&format=json`;
-      const resp = await fetch(url, {
-        headers: { "User-Agent": BROWSER_USER_AGENT },
-      });
+      const url = `${base}/search?q=${encodeURIComponent(query)}&format=json&pageno=${page}`;
+      const resp = await fetch(url, { headers: { "User-Agent": BROWSER_USER_AGENT } });
       if (!resp.ok) continue;
 
       const contentType = resp.headers.get("content-type") || "";
       if (!contentType.includes("application/json")) continue;
       
       const json: any = await resp.json();
-      const results = json.results ?? [];
+      const items = json.results ?? [];
       
-      if (results.length > 0) {
-        let output = "*Web results (SearXNG):*\n\n";
-        let count = 0;
-        for (const r of results) {
+      if (items.length > 0) {
+        const results: WebResult[] = [];
+        for (const r of items) {
           if (!r.url || !r.title) continue;
-          output += `🌐 [${escapeMarkdown(r.title)}](${r.url})\n\n`;
-          count++;
-          if (count >= 6) break;
+          results.push({
+              title: r.title,
+              url: r.url,
+              snippet: r.content || r.snippet || ""
+          });
+          if (results.length >= 10) break;
         }
-        return output;
+        return { results, hasNext: items.length >= 8 };
       }
     } catch (e) {
-      // Instance failed, move to next
+      // Move to next instance
     }
   }
   return null;
 }
 
-// ----------------------------------------------------
-// Main Web Search Exporter
-// ----------------------------------------------------
-export async function searchWeb(query: string): Promise<string> {
+async function tryBingSearch(query: string, page: number): Promise<WebPage | null> {
+  try {
+    const first = (page - 1) * 10 + 1;
+    const resp = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&first=${first}`, {
+      headers: { "User-Agent": BROWSER_USER_AGENT, "Accept-Language": "en-US,en;q=0.9" }
+    });
+    const html = await resp.text();
     
-  // 1. Try DuckDuckGo Post (High Success Rate)
-  const ddgResult = await tryDuckDuckGoHTMLPost(query);
-  if (ddgResult) return ddgResult;
+    const results: WebResult[] = [];
+    const liRegex = /<li class="b_algo"(.*?)<\/li>/gis;
+    let liMatch;
+    
+    while ((liMatch = liRegex.exec(html)) !== null) {
+      const liHtml = liMatch[1];
+      const titleMatch = liHtml.match(/<h2><a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a><\/h2>/i);
+      if (!titleMatch) continue;
+      
+      const link = titleMatch[1];
+      const title = titleMatch[2].replace(/<[^>]+>/g, "").replace(/&[a-z]+;/g, "").trim();
+      
+      let snippet = "";
+      const snipMatch = liHtml.match(/<div class="b_caption">(.*?)<\/div>/is) || liHtml.match(/<p[^>]*>(.*?)<\/p>/is);
+      if (snipMatch) {
+         snippet = snipMatch[1].replace(/<[^>]+>/g, "").replace(/&[a-z]+;/g, "").trim();
+      }
 
-  // 2. Try Bing (High Success Rate)
-  const bingResult = await tryBingSearch(query);
-  if (bingResult) return bingResult;
+      if (link.startsWith("http") && !link.includes("microsoft.com")) {
+        results.push({ title, url: link, snippet });
+      }
+      if (results.length >= 10) break;
+    }
+    
+    if (results.length > 0) {
+       return { results, hasNext: results.length >= 8 };
+    }
+  } catch (e) {
+    console.log("Bing Scraper error:", e);
+  }
+  return null;
+}
 
-  // 3. Try SearXNG Public rotation
-  const searxResult = await trySearXNG(query);
-  if (searxResult) return searxResult;
+export async function searchWeb(query: string, page: number = 1): Promise<WebPage> {
+  // Try SearXNG Public rotation first for easiest JSON & snippets
+  const searxResult = await trySearXNG(query, page);
+  if (searxResult && searxResult.results.length > 0) return searxResult;
 
-  return "⚠️ No web results found. The search engines might be temporarily blocking our requests.";
+  // Fallback to Bing scraper
+  const bingResult = await tryBingSearch(query, page);
+  if (bingResult && bingResult.results.length > 0) return bingResult;
+
+  return { results: [], hasNext: false };
 }
