@@ -27,31 +27,35 @@ export interface PaperResult {
   openAccessPdf: string | null;  // direct PDF
 }
 
-// ---------- arXiv XML helpers ----------
-function extractTag(parent: Element, tag: string): string {
-  const el = parent.getElementsByTagName(tag)[0];
-  return el?.textContent?.trim() ?? "";
+// ------------------------------------------------------------
+//  Regex helpers for arXiv Atom XML
+// ------------------------------------------------------------
+function extractText(xml: string, tag: string): string {
+  const regex = new RegExp(`<${tag}[^>]*>(.*?)</${tag}>`, "s");
+  const match = xml.match(regex);
+  return match ? match[1].trim().replace(/\n\s+/g, " ") : "";
 }
 
-function extractAuthors(entry: Element): string[] {
-  const authorNodes = entry.getElementsByTagName("author");
-  const authors: string[] = [];
-  for (let i = 0; i < authorNodes.length; i++) {
-    const name = extractTag(authorNodes[i], "name");
-    if (name) authors.push(name);
+function extractAuthorNames(entryXml: string): string[] {
+  const authorRegex = /<author>([\s\S]*?)<\/author>/g;
+  const names: string[] = [];
+  let match;
+  while ((match = authorRegex.exec(entryXml)) !== null) {
+    const name = extractText(match[1], "name");
+    if (name) names.push(name);
   }
-  return authors;
+  return names;
 }
 
-function extractYear(publishedDate: string): number | null {
-  const match = publishedDate.match(/(\d{4})/);
+function extractYear(published: string): number | null {
+  const match = published.match(/(\d{4})/);
   return match ? parseInt(match[1], 10) : null;
 }
 
 export async function searchPapers(query: string): Promise<PaperResult[]> {
-  // Build arXiv API search query
+  // arXiv API – search all fields by default
   const params = new URLSearchParams({
-    search_query: `all:${encodeURIComponent(query)}`,
+    search_query: query,          // plain text; arXiv searches all fields
     start: "0",
     max_results: "5",
     sortBy: "relevance",
@@ -61,32 +65,36 @@ export async function searchPapers(query: string): Promise<PaperResult[]> {
 
   try {
     const resp = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
-    const text = await resp.text();
+    const xml = await resp.text();
 
-    // Parse XML (Cloudflare Workers have DOMParser)
-    const parser = new DOMParser();
-    const xmlDoc = parser.parseFromString(text, "text/xml");
-    const entries = xmlDoc.getElementsByTagName("entry");
-
+    // Extract <entry> blocks with regex
+    const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
     const results: PaperResult[] = [];
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i];
-      const title = extractTag(entry, "title").replace(/\n\s*/g, " ");
-      const id = extractTag(entry, "id"); // e.g., "http://arxiv.org/abs/2301.0001v1"
-      const paperUrl = id; // abstract page
-      const pdfUrl = id.replace("/abs/", "/pdf/") + ".pdf"; // direct PDF
-      const authors = extractAuthors(entry);
-      const published = extractTag(entry, "published"); // e.g., "2024-05-10T00:00:00Z"
+    let entryMatch;
+
+    while ((entryMatch = entryRegex.exec(xml)) !== null) {
+      const entryXml = entryMatch[1];
+
+      const title = extractText(entryXml, "title");
+      const id = extractText(entryXml, "id");             // e.g., http://arxiv.org/abs/2301.1234
+      const published = extractText(entryXml, "published"); // e.g., 2023-01-05T00:00:00Z
+      const authors = extractAuthorNames(entryXml);
       const year = extractYear(published);
+
+      // PDF link – replace /abs/ with /pdf/ (arXiv PDFs are always open)
+      const pdfUrl = id ? id.replace("/abs/", "/pdf/") + ".pdf" : null;
 
       results.push({
         title: title || "Untitled",
         year,
         authors,
-        url: paperUrl,
-        openAccessPdf: pdfUrl,  // arXiv PDFs are always open access
+        url: id,                // abstract page
+        openAccessPdf: pdfUrl,
       });
+
+      if (results.length >= 5) break;
     }
+
     return results;
   } catch (e) {
     console.error("arXiv search error:", e);
