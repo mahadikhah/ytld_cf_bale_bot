@@ -260,6 +260,7 @@ async function processUpdate(env: Env, update: any) {
   if (text === '/start') {
     const welcome = `🎬 *Welcome to your Search & Media Bot*\n\nHere is what I can do:\n\n` +
       `📥 *YouTube Downloader*\nSend me any YouTube link directly and I'll fetch the available download qualities.\n\n` +
+      `📄 *Paper search & download scholarly* \nUse \`/paper <query>\` \n search for papers in scholarly platform and download them.\n\n` +
       `🔍 *YouTube Search*\nUse \`/ysearch <query>\` to search for videos, or \`/ysearch_latest <query>\` to find the most recently uploaded content.\n\n` +
       `🌐 *Web Search*\nUse \`/search <query>\` to perform a secure, paginated web search.\n\n` +
       `💎 *Premium Access*\nPremium users receive priority queue access. Use /buy to check options.`;
