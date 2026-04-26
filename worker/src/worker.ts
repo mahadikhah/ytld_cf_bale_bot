@@ -186,7 +186,7 @@ async function processUpdate(env: Env, update: any) {
       await callBaleApi(env, 'sendMessage', {
         chat_id: chatId,
         text: result,
-        parse_mode: 'HTML',
+        parse_mode: 'Markdown',
       });
     }
     return;
@@ -200,7 +200,7 @@ async function processUpdate(env: Env, update: any) {
       await callBaleApi(env, 'sendMessage', {
         chat_id: chatId,
         text: result,
-        parse_mode: 'HTML',
+        parse_mode: 'Markdown',
       });
     }
     return;
