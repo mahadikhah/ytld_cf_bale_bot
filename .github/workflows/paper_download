@@ -1,0 +1,76 @@
+name: Paper Download (Bash only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      chat_id:
+        description: 'Bale chat ID'
+        required: true
+      paper_url:
+        description: 'Paper PDF URL'
+        required: true
+      title:
+        description: 'Paper title'
+        required: true
+
+jobs:
+  download-and-send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download PDF
+        run: |
+          echo "Downloading ${{ inputs.paper_url }}"
+          curl -L -o paper.pdf "${{ inputs.paper_url }}"
+
+      - name: Check size and send
+        env:
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.chat_id }}
+          TITLE: ${{ inputs.title }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+        run: |
+          FILE_SIZE=$(stat -c%s paper.pdf)
+          MAX_SIZE=$((20 * 1024 * 1024))   # 20 MB
+          SAFE_TITLE=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-45)
+
+          if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
+            echo "File size $(($FILE_SIZE / 1024 / 1024)) MB – sending directly"
+            curl -s -F "document=@paper.pdf" \
+                 -F "caption=$SAFE_TITLE" \
+                 "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}"
+          else
+            echo "File too large – splitting into 15 MB chunks"
+            # Create split zip archive (produces paper.z01, paper.z02 ... paper.zip)
+            zip -s 15m paper.zip paper.pdf
+            PARTS=$(ls paper.z* paper.zip 2>/dev/null | sort -V)
+            PART_COUNT=$(echo "$PARTS" | wc -l)
+            PART_NUM=1
+            for part in $PARTS; do
+              echo "Sending part $PART_NUM/$PART_COUNT: $part"
+              curl -s -F "document=@$part" \
+                   "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}"
+              PART_NUM=$((PART_NUM + 1))
+              sleep 1
+            done
+            # Send instructions
+            INSTR="✅ Download complete!\n\n**How to open your paper:**\n1. Download all parts to the same folder.\n2. Open/extract ONLY the 'paper.zip' file.\n3. Your system will reassemble the PDF automatically."
+            curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$INSTR\", \"parse_mode\": \"Markdown\"}"
+          fi
+
+      - name: Unlock worker queue
+        if: always()
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          CHAT_ID: ${{ inputs.chat_id }}
+        run: |
+          if [ -n "$WORKER_URL" ] && [ -n "$WORKER_SECRET" ]; then
+            curl -s -X POST "$WORKER_URL/github/done" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"secret\": \"$WORKER_SECRET\", \"chat_id\": \"$CHAT_ID\"}"
+          fi
