@@ -1,7 +1,7 @@
 // worker/src/paper_search.ts
 // ======================================
 //  Scholarly paper search – arXiv API
-//  with pagination
+//  pagination with new‑message navigation
 // ======================================
 
 const ARXIV_API = "https://export.arxiv.org/api/query";
@@ -25,8 +25,8 @@ export interface PaperResult {
   title: string;
   year: number | null;
   authors: string[];
-  url: string;           // abstract page
-  openAccessPdf: string | null;  // direct PDF
+  url: string;
+  openAccessPdf: string | null;
 }
 
 export interface SearchResponse {
@@ -35,7 +35,7 @@ export interface SearchResponse {
   startIndex: number;
 }
 
-// ---------- Regex helpers ----------
+// ---------- XML helpers (unchanged) ----------
 function extractText(xml: string, tag: string): string {
   const regex = new RegExp(`<${tag}[^>]*>(.*?)</${tag}>`, "s");
   const match = xml.match(regex);
@@ -58,6 +58,7 @@ function extractYear(published: string): number | null {
   return match ? parseInt(match[1], 10) : null;
 }
 
+// ---------- Core search function ----------
 export async function searchPapers(
   query: string,
   start = 0
@@ -75,11 +76,9 @@ export async function searchPapers(
     const resp = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
     const xml = await resp.text();
 
-    // Total results
     const totalResultsStr = extractText(xml, "opensearch:totalResults");
     const totalResults = parseInt(totalResultsStr, 10) || 0;
 
-    // Extract entries
     const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
     const papers: PaperResult[] = [];
     let entryMatch;
@@ -112,6 +111,7 @@ export async function searchPapers(
   }
 }
 
+// ---------- Message builder (with Previous/Next) ----------
 export function buildPaperMessage(
   response: SearchResponse,
   originalQuery: string
@@ -151,19 +151,35 @@ export function buildPaperMessage(
     }
   });
 
-  // Pagination – "Next" button if more results remain
-  const nextStart = startIndex + papers.length;
-  if (nextStart < totalResults) {
-    keyboard.push([
-      {
-        text: "Next ➡️",
-        callback_data: `paper_next|${encodeURIComponent(originalQuery)}|${nextStart}`,
-      },
-    ]);
+  // Navigation row (Previous + Next)
+  const navRow: any[] = [];
+
+  // Previous button – only if not on first page
+  if (startIndex > 0) {
+    const prevStart = Math.max(startIndex - MAX_RESULTS_PER_PAGE, 0);
+    navRow.push({
+      text: "⬅️ Previous",
+      callback_data: `paper_prev|${encodeURIComponent(originalQuery)}|${prevStart}`,
+    });
   }
 
-  // Show progress info
-  text += `_Showing ${startIndex + 1}–${nextStart} of ${totalResults} results_`;
+  // Next button – only if more results remain
+  const nextStart = startIndex + papers.length;
+  if (nextStart < totalResults) {
+    navRow.push({
+      text: "Next ➡️",
+      callback_data: `paper_next|${encodeURIComponent(originalQuery)}|${nextStart}`,
+    });
+  }
+
+  if (navRow.length > 0) {
+    keyboard.push(navRow);
+  }
+
+  // Progress indicator
+  const first = startIndex + 1;
+  const last = Math.min(nextStart, totalResults);
+  text += `_Showing ${first}–${last} of ${totalResults} results_`;
 
   return { text, keyboard };
 }
