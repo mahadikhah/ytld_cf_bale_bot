@@ -122,6 +122,7 @@ async function processUpdate(env: Env, update: any) {
         await env.USER_PLANS.delete(`dl_queue:${chatId}`);
         await answerCallbackSafe(env, callbackId, 'Error processing request.', true);
       }
+      return;
     } 
           // ---------- Handle "Download" button ----------
     if (cbData.startsWith("ytdl|")) {
