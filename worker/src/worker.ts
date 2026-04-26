@@ -140,7 +140,7 @@ async function processUpdate(env: Env, update: any) {
       // ---------- Handle "Thumbnail" button ----------
     if (cbData.startsWith("thumb|")) {
         const videoId = cbData.split("|")[1];
-        const thumbUrl = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+        const thumbUrl = `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
         await callBaleApi(env, "sendPhoto", {
           chat_id: chatId,
           photo: thumbUrl,
