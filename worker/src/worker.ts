@@ -253,9 +253,10 @@ async function processUpdate(env: Env, update: any) {
         const response = await searchPapers(query, start);
         const { text: msgText, keyboard } = buildPaperMessage(response, query);
 
-        // Send as a **new** message (do not edit the original)
-        await callBaleApi(env, "sendMessage", {
+        // Edit the original message
+        await callBaleApi(env, "editMessageText", {
           chat_id: chatId,
+          message_id: cb.message.message_id,
           text: msgText,
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: keyboard },
