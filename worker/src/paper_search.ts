@@ -1,9 +1,11 @@
 // worker/src/paper_search.ts
 // ======================================
 //  Scholarly paper search – arXiv API
+//  with pagination
 // ======================================
 
 const ARXIV_API = "https://export.arxiv.org/api/query";
+const MAX_RESULTS_PER_PAGE = 10;
 const USER_AGENT = "Mozilla/5.0 (compatible; BaleYouTubeBot/1.0)";
 
 function escapeMarkdown(text: string): string {
@@ -27,9 +29,13 @@ export interface PaperResult {
   openAccessPdf: string | null;  // direct PDF
 }
 
-// ------------------------------------------------------------
-//  Regex helpers for arXiv Atom XML
-// ------------------------------------------------------------
+export interface SearchResponse {
+  papers: PaperResult[];
+  totalResults: number;
+  startIndex: number;
+}
+
+// ---------- Regex helpers ----------
 function extractText(xml: string, tag: string): string {
   const regex = new RegExp(`<${tag}[^>]*>(.*?)</${tag}>`, "s");
   const match = xml.match(regex);
@@ -52,12 +58,14 @@ function extractYear(published: string): number | null {
   return match ? parseInt(match[1], 10) : null;
 }
 
-export async function searchPapers(query: string): Promise<PaperResult[]> {
-  // arXiv API – search all fields by default
+export async function searchPapers(
+  query: string,
+  start = 0
+): Promise<SearchResponse> {
   const params = new URLSearchParams({
-    search_query: query,          // plain text; arXiv searches all fields
-    start: "0",
-    max_results: "5",
+    search_query: query,
+    start: start.toString(),
+    max_results: MAX_RESULTS_PER_PAGE.toString(),
     sortBy: "relevance",
     sortOrder: "descending",
   });
@@ -67,45 +75,49 @@ export async function searchPapers(query: string): Promise<PaperResult[]> {
     const resp = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
     const xml = await resp.text();
 
-    // Extract <entry> blocks with regex
+    // Total results
+    const totalResultsStr = extractText(xml, "opensearch:totalResults");
+    const totalResults = parseInt(totalResultsStr, 10) || 0;
+
+    // Extract entries
     const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
-    const results: PaperResult[] = [];
+    const papers: PaperResult[] = [];
     let entryMatch;
 
     while ((entryMatch = entryRegex.exec(xml)) !== null) {
       const entryXml = entryMatch[1];
 
       const title = extractText(entryXml, "title");
-      const id = extractText(entryXml, "id");             // e.g., http://arxiv.org/abs/2301.1234
-      const published = extractText(entryXml, "published"); // e.g., 2023-01-05T00:00:00Z
+      const id = extractText(entryXml, "id");
+      const published = extractText(entryXml, "published");
       const authors = extractAuthorNames(entryXml);
       const year = extractYear(published);
-
-      // PDF link – replace /abs/ with /pdf/ (arXiv PDFs are always open)
       const pdfUrl = id ? id.replace("/abs/", "/pdf/") + ".pdf" : null;
 
-      results.push({
+      papers.push({
         title: title || "Untitled",
         year,
         authors,
-        url: id,                // abstract page
+        url: id,
         openAccessPdf: pdfUrl,
       });
 
-      if (results.length >= 5) break;
+      if (papers.length >= MAX_RESULTS_PER_PAGE) break;
     }
 
-    return results;
+    return { papers, totalResults, startIndex: start };
   } catch (e) {
     console.error("arXiv search error:", e);
-    return [];
+    return { papers: [], totalResults: 0, startIndex: start };
   }
 }
 
-export function buildPaperMessage(papers: PaperResult[]): {
-  text: string;
-  keyboard: any[][];
-} {
+export function buildPaperMessage(
+  response: SearchResponse,
+  originalQuery: string
+): { text: string; keyboard: any[][] } {
+  const { papers, totalResults, startIndex } = response;
+
   if (papers.length === 0) {
     return {
       text: "No scholarly articles found. Try a broader query.",
@@ -117,7 +129,7 @@ export function buildPaperMessage(papers: PaperResult[]): {
   const keyboard: any[][] = [];
 
   papers.forEach((p, i) => {
-    const idx = i + 1;
+    const idx = startIndex + i + 1; // global index
     const title = escapeMarkdown(p.title);
     const yearStr = p.year ? ` (${p.year})` : "";
     const authorsStr = p.authors.join(", ");
@@ -138,6 +150,20 @@ export function buildPaperMessage(papers: PaperResult[]): {
       ]);
     }
   });
+
+  // Pagination – "Next" button if more results remain
+  const nextStart = startIndex + papers.length;
+  if (nextStart < totalResults) {
+    keyboard.push([
+      {
+        text: "Next ➡️",
+        callback_data: `paper_next|${encodeURIComponent(originalQuery)}|${nextStart}`,
+      },
+    ]);
+  }
+
+  // Show progress info
+  text += `_Showing ${startIndex + 1}–${nextStart} of ${totalResults} results_`;
 
   return { text, keyboard };
 }
