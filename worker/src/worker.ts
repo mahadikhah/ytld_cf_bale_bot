@@ -1,7 +1,6 @@
 // worker/src/worker.ts
 import { Hono } from 'hono';
-import { searchYouTube, searchWeb } from './search';
-
+import { searchYouTube, searchWeb, buildYtMessage } from "./search";
 
 export interface Env {
   BOT_STATE: KVNamespace;
@@ -123,7 +122,67 @@ async function processUpdate(env: Env, update: any) {
         await env.USER_PLANS.delete(`dl_queue:${chatId}`);
         await answerCallbackSafe(env, callbackId, 'Error processing request.', true);
       }
-    } else if (cbData === 'check_premium') {
+    } 
+          // ---------- Handle "Download" button ----------
+    if (cbData.startsWith("ytdl|")) {
+        const videoId = cbData.split("|")[1];
+        // Send a message to the chat containing the YouTube link,
+        // which will be processed as a regular download request.
+        await callBaleApi(env, "sendMessage", {
+          chat_id: chatId,
+          text: `https://youtu.be/${videoId}`,
+        });
+        await answerCallbackSafe(env, callbackId, "✅ Link sent for download.");
+        return;
+    }
+
+      // ---------- Handle "Thumbnail" button ----------
+    if (cbData.startsWith("thumb|")) {
+        const videoId = cbData.split("|")[1];
+        const thumbUrl = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+        await callBaleApi(env, "sendPhoto", {
+          chat_id: chatId,
+          photo: thumbUrl,
+          caption: `Thumbnail for ${videoId}`,
+        });
+        await answerCallbackSafe(env, callbackId, "🖼️ Thumbnail sent.");
+        return;
+    }
+
+      // ---------- Handle "Next page" button ----------
+    if (cbData.startsWith("yt_next|")) {
+        const nextToken = cbData.substring(8);
+        // Retrieve the stored query & filter from KV (we'll set them when the first page was sent)
+        const queryKey = `yt_query:${chatId}`;
+        const filterKey = `yt_filter:${chatId}`;
+        const originalQuery = await env.BOT_STATE.get(queryKey);
+        const originalFilter =
+          (await env.BOT_STATE.get(filterKey)) as "relevance" | "date" | null;
+
+        if (!originalQuery) {
+          await answerCallbackSafe(env, callbackId, "Search session expired.", true);
+          return;
+      }
+
+        const page = await searchYouTube(
+          originalQuery,
+          originalFilter || "relevance",
+          nextToken
+        );
+        const { text: messageText, keyboard } = buildYtMessage(page);
+
+        // Update the same message (we need the message_id; stored in cb.message.message_id)
+        await callBaleApi(env, "editMessageText", {
+          chat_id: chatId,
+          message_id: cb.message.message_id,
+          text: messageText,
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: keyboard },
+        });
+        await answerCallbackSafe(env, callbackId);
+        return;
+    }
+    else if (cbData === 'check_premium') {
       const access = await hasAccess(env, chatId);
       const msg = access ? '✅ You have premium/admin access.' : '❌ No premium subscription found.';
       await answerCallbackSafe(env, callbackId, msg, true);
@@ -179,30 +238,56 @@ async function processUpdate(env: Env, update: any) {
     return;
   }
 
-  if (text.startsWith('/search ')) {
+  // ---------- Web Search ----------
+  if (text.startsWith("/search ")) {
     const query = text.slice(8).trim();
     if (query) {
       const result = await searchWeb(query);
-      await callBaleApi(env, 'sendMessage', {
+      console.log("/search output (first 200 chars):", result.slice(0, 200));
+      await callBaleApi(env, "sendMessage", {
         chat_id: chatId,
         text: result,
-        parse_mode: 'Markdown',
+        parse_mode: "Markdown",
       });
     }
     return;
   }
 
   // ---------- YouTube Search ----------
-  if (text.startsWith('/ysearch ')) {
-    const query = text.slice(9).trim();
-    if (query) {
-      const result = await searchYouTube(query);
-      await callBaleApi(env, 'sendMessage', {
-        chat_id: chatId,
-        text: result,
-        parse_mode: 'Markdown',
-      });
+  if (text.startsWith("/ysearch ") || text.startsWith("/ysearch_latest ")) {
+    const args = text.split(" ");
+    let filter: "relevance" | "date" = "relevance";
+    let queryStartIndex = 1;
+
+    if (args[0] === "/ysearch_latest") {
+      filter = "date";
+      queryStartIndex = 1;
+    } else if (args[1] === "latest") {
+      filter = "date";
+      queryStartIndex = 2;
     }
+
+    const query = args.slice(queryStartIndex).join(" ").trim();
+    if (!query) return;
+
+    const page = await searchYouTube(query, filter);
+    const { text: messageText, keyboard } = buildYtMessage(page);
+
+    console.log("/ysearch output (first 200 chars):", messageText.slice(0, 200));
+
+    await env.BOT_STATE.put(`yt_query:${chatId}`, query, { expirationTtl: 300 });
+    await env.BOT_STATE.put(
+          `yt_filter:${chatId}`,
+          filter,
+        { expirationTtl: 300 }
+    );
+    
+    await callBaleApi(env, "sendMessage", {
+      chat_id: chatId,
+      text: messageText,
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: keyboard },
+    });
     return;
   }
 
