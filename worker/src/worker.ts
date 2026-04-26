@@ -1,6 +1,7 @@
 // worker/src/worker.ts
 import { Hono } from 'hono';
 import { searchYouTube, searchWeb, buildYtMessage } from "./search";
+import { searchPapers, buildPaperMessage } from "./paper_search";
 
 export interface Env {
   BOT_STATE: KVNamespace;
@@ -40,10 +41,14 @@ async function callBaleApi(env: Env, method: string, body: any) {
   return data;
 }
 
-async function triggerWorkflow(env: Env, inputs: Record<string, string>) {
+async function triggerWorkflow(
+  env: Env, 
+  inputs: Record<string, string>
+  workflowFile = "bot.yml"   // <-- new parameter with default
+) {
   if (!env.GITHUB_REPO) throw new Error('GITHUB_REPO not defined');
   const [owner, repo] = env.GITHUB_REPO.split('/');
-  const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/bot.yml/dispatches`;
+  const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`;
   const resp = await fetch(url, {
     method: 'POST',
     headers: {
@@ -179,6 +184,65 @@ async function processUpdate(env: Env, update: any) {
         await answerCallbackSafe(env, callbackId);
         return;
     }
+      // ---------- Hybrid paper download ----------
+    if (cbData.startsWith("paper|")) {
+        const parts = cbData.split("|");
+        if (parts.length < 3) return;
+        const pdfUrl = decodeURIComponent(parts[1]);
+        const title = decodeURIComponent(parts[2]);
+
+        // Attempt direct send
+        let directSuccess = false;
+        try {
+          const resp = await fetch(
+            `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/sendDocument`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                chat_id: chatId,
+                document: pdfUrl,
+                caption: title,
+              }),
+            }
+          );
+          const json = await resp.json();
+          directSuccess = resp.ok && json.ok;
+          if (directSuccess) {
+            await answerCallbackSafe(env, callbackId, "✅ Paper sent.");
+            return;
+          }
+          console.log("Direct send failed:", resp.status, json);
+        } catch (e) {
+          console.log("Direct send error:", e);
+        }
+
+        // Fallback: GitHub Actions (check queue first)
+        if (!directSuccess) {
+          const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+          if (isQueued === "true") {
+            await answerCallbackSafe(env, callbackId, "⚠️ You already have a download in progress.", true);
+            return;
+          }
+          await env.USER_PLANS.put(`dl_queue:${chatId}`, "true");
+          await answerCallbackSafe(env, callbackId, "⏳ Downloading via workflow…");
+          await callBaleApi(env, "sendMessage", {
+            chat_id: chatId,
+            text: `📥 Large paper – processing. You'll receive the file shortly.`,
+          });
+          await triggerWorkflow(
+            env,
+            {
+              chat_id: chatId.toString(),
+              paper_url: pdfUrl,
+              title,
+            },
+            "paper_download.yml"
+          );
+        }
+        return;
+    }
+        
     else if (cbData === 'check_premium') {
       const access = await hasAccess(env, chatId);
       const msg = access ? '✅ You have premium/admin access.' : '❌ No premium subscription found.';
@@ -287,7 +351,21 @@ async function processUpdate(env: Env, update: any) {
     return;
   }
 
+  if (text.startsWith("/paper ")) {
+    const query = text.slice(7).trim();
+    if (!query) return;
+    const papers = await searchPapers(query);
+    const { text: msgText, keyboard } = buildPaperMessage(papers);
+    await callBaleApi(env, "sendMessage", {
+      chat_id: chatId,
+      text: msgText,
+      parse_mode: "Markdown",
+      reply_markup: keyboard.length ? { inline_keyboard: keyboard } : undefined,
+    });
+    return;
+  }
 
+  
   const videoId = extractYouTubeId(text);
   if (videoId) {
     if (!(await hasAccess(env, chatId))) {
