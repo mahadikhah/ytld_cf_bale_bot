@@ -1,5 +1,7 @@
 // worker/src/worker.ts
 import { Hono } from 'hono';
+import { searchYouTube, searchWeb } from './search';
+
 
 export interface Env {
   BOT_STATE: KVNamespace;
@@ -176,6 +178,34 @@ async function processUpdate(env: Env, update: any) {
     await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: msg });
     return;
   }
+
+  if (text.startsWith('/search ')) {
+    const query = text.slice(8).trim();
+    if (query) {
+      const result = await searchWeb(query);
+      await callBaleApi(env, 'sendMessage', {
+        chat_id: chatId,
+        text: result,
+        parse_mode: 'HTML',
+      });
+    }
+    return;
+  }
+
+  // ---------- YouTube Search ----------
+  if (text.startsWith('/ysearch ')) {
+    const query = text.slice(9).trim();
+    if (query) {
+      const result = await searchYouTube(query);
+      await callBaleApi(env, 'sendMessage', {
+        chat_id: chatId,
+        text: result,
+        parse_mode: 'HTML',
+      });
+    }
+    return;
+  }
+
 
   const videoId = extractYouTubeId(text);
   if (videoId) {
