@@ -2,6 +2,7 @@
 import { Hono } from 'hono';
 import { searchYouTube, searchWeb, buildYtMessage } from "./search";
 import { searchPapers, buildPaperMessage } from "./paper_search";
+import { getWeatherReport } from "./weather";
 
 export interface Env {
   BOT_STATE: KVNamespace;
@@ -283,8 +284,9 @@ async function processUpdate(env: Env, update: any) {
     const welcome =
       `🎬 *Welcome to your Search & Media Bot*\n\n` +
       `• 📥 *YouTube Downloader* – Send a YouTube link to get download qualities.\n` +
-      `• 📄 *Paper Search* – \`/paper <query>\` searches arXiv and lets you download PDFs.\n` +
       `• 🔍 *YouTube Search* – \`/ysearch <query>\` or \`/ysearch_latest <query>\` for newest videos.\n` +
+      `• 📄 *Paper Search* – \`/paper <query>\` searches arXiv and lets you download PDFs.\n` +
+      `• 🌦️ *Weather* – \`/weather <city>\` for hourly + 7‑day forecast.\n`+
       `• 🌐 *Web Search* – \`/search <query>\` for web search.\n` +
       `• 💎 *Premium* – Priority queue. Use /buy to upgrade.`;
     await callBaleApi(env, 'sendMessage', {
@@ -384,6 +386,19 @@ async function processUpdate(env: Env, update: any) {
       text: msgText,
       parse_mode: "Markdown",
       reply_markup: keyboard.length ? { inline_keyboard: keyboard } : undefined,
+    });
+    return;
+  }
+
+    // ---------- Weather forecast ----------
+  if (text.startsWith("/weather ")) {
+    const city = text.slice(9).trim();
+    if (!city) return;
+    const report = await getWeatherReport(city);
+    await callBaleApi(env, "sendMessage", {
+      chat_id: chatId,
+      text: report,
+      parse_mode: "Markdown",
     });
     return;
   }
