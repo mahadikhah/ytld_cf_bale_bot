@@ -29,21 +29,20 @@ jobs:
         env:
           PAGE_URL: ${{ inputs.page_url }}
         run: |
-          echo "Starting single-file capture..."
+          echo "Capturing page with SingleFile..."
           single-file "$PAGE_URL" page.html \
             --browser-arg="--no-sandbox" \
             --browser-arg="--disable-setuid-sandbox" \
             --browser-load-max-time=45000 \
             --browser-capture-max-time=45000 \
-            --browser-wait-until="networkIdle" \
-            --verbose 2>&1 | tee single-file.log
+            --browser-wait-until="networkIdle"
 
-          echo "Capture exit code: $?"
           if [ ! -f page.html ]; then
-            echo "page.html not found. Last 20 lines of log:"
-            tail -20 single-file.log
+            echo " Error: page.html was not created"
             exit 1
           fi
+          echo "Capture successful, file size: $(stat -c%s page.html) bytes"
+
           
       - name: Zip and send
         env:
