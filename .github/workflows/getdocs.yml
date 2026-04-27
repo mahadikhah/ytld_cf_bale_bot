@@ -1,4 +1,4 @@
-name: Mirror Documentation Site
+name: Mirror Documentation Site (SingleFile)
 
 on:
   workflow_dispatch:
@@ -11,66 +11,169 @@ on:
         required: true
       title:
         description: 'Site name (for zip filename)'
-        default: 'docs-mirror'
+        default: 'docs'
 
 jobs:
   mirror-and-send:
     runs-on: ubuntu-latest
-    timeout-minutes: 5            # short overall timeout – we kill wget earlier anyway
+    timeout-minutes: 5            # overall max (2min capturing + zip + upload)
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mirror site with wget (time-limited)
+      - name: Cache Puppeteer
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/puppeteer
+            ~/.npm
+          key: ${{ runner.os }}-puppeteer-${{ hashFiles('.github/workflows/getdocs.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-puppeteer-
+
+      - name: Setup Node & install dependencies
+        run: |
+          npm init -y
+          npm install puppeteer single-file-cli
+
+      - name: Discover pages and capture (2‑minute limit)
         env:
           DOCS_URL: ${{ inputs.docs_url }}
           TITLE: ${{ inputs.title }}
         run: |
-          SAFE_TITLE=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-40)
-          mkdir -p "mirror/$SAFE_TITLE"
-          cd "mirror/$SAFE_TITLE"
+          mkdir -p output
 
-          # Crawl only 2 levels deep, stay on the same domain, stop after 120 seconds
-          timeout 120 wget \
-            --recursive \
-            --level=2 \
-            --domains=$(echo "$DOCS_URL" | sed -E 's#^https?://([^/]+).*#\1#') \
-            --page-requisites \
-            --adjust-extension \
-            --convert-links \
-            --execute robots=off \
-            --no-verbose \
-            --wait=0.2 \
-            --random-wait \
-            --tries=2 \
-            --timeout=10 \
-            --reject='*.exe,*.dll,*.bat,*.sh,*.cgi,*.php,*.py' \
-            --limit-rate=500k \
-            "$DOCS_URL" || true
-          echo "wget finished (or was interrupted after 120s)"
+          cat > capture.js << 'SCRIPT_END'
+          const puppeteer = require('puppeteer');
+          const { execSync } = require('child_process');
+          const fs = require('fs');
+          const path = require('path');
 
-      - name: Zip and send
+          const baseUrl = process.env.DOCS_URL;
+          const origin = new URL(baseUrl).origin;
+
+          // Generate safe filename from a URL path
+          function safeName(url) {
+            return url
+              .replace(/^https?:\/\//, '')
+              .replace(/[^a-zA-Z0-9\/\-]/g, '_')
+              .replace(/\//g, '_')
+              .substring(0, 80) + '.html';
+          }
+
+          async function run() {
+            console.log('Launching browser...');
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: ['--no-sandbox', '--disable-setuid-sandbox']
+            });
+            const page = await browser.newPage();
+
+            try {
+              console.log(`Loading base page: ${baseUrl}`);
+              await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+
+              // Collect all internal links from common doc navigation areas
+              const links = await page.evaluate((baseOrigin) => {
+                const selectors = 'nav a[href], .sidebar a[href], .menu a[href], .toc a[href]';
+                const anchors = document.querySelectorAll(selectors);
+                const urls = new Set();
+                anchors.forEach(a => {
+                  try {
+                    const href = a.href;
+                    if (href && href.startsWith(baseOrigin)) {
+                      // Remove hash and trailing slash for dedup
+                      const clean = href.split('#')[0].replace(/\/$/, '');
+                      urls.add(clean);
+                    }
+                  } catch(e) {}
+                });
+                // Also include the base URL itself
+                urls.add(baseUrl.replace(/\/$/, ''));
+                return Array.from(urls).slice(0, 30);  // max 30 pages
+              }, origin);
+
+              console.log(`Found ${links.length} pages to capture`);
+              fs.writeFileSync('urls.txt', links.join('\n'));
+
+              // Capture each page (will be interrupted after ~2 minutes by external timeout)
+              let captured = 0;
+              for (const url of links) {
+                const filename = safeName(url);
+                const outputPath = path.join('output', filename);
+
+                if (fs.existsSync(outputPath)) {
+                  console.log(`Skipping already captured: ${filename}`);
+                  continue;
+                }
+
+                try {
+                  console.log(`[${captured+1}/${links.length}] Capturing: ${url}`);
+                  execSync(
+                    `npx single-file "${url}" "${outputPath}"` +
+                    ` --browser-arg="--no-sandbox"` +
+                    ` --browser-arg="--disable-setuid-sandbox"` +
+                    ` --browser-load-max-time=15000` +
+                    ` --browser-capture-max-time=15000` +
+                    ` --browser-wait-until="networkIdle"`,
+                    { stdio: 'pipe', timeout: 20000 }
+                  );
+                  captured++;
+                  console.log(`  -> saved as ${filename}`);
+                } catch(e) {
+                  console.error(`  -> failed: ${e.message?.slice(0,100)}`);
+                }
+              }
+            } finally {
+              await browser.close();
+            }
+
+            // Create a simple index.html
+            const files = fs.readdirSync('output').filter(f => f.endsWith('.html'));
+            let indexHtml = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Docs Mirror</title></head><body><h1>Documentation</h1><ul>';
+            files.forEach(f => {
+              if (f === 'index.html') return;
+              indexHtml += `<li><a href="${f}">${f.replace('.html','').replace(/_/g,' ')}</a></li>`;
+            });
+            indexHtml += '</ul></body></html>';
+            fs.writeFileSync('output/index.html', indexHtml);
+            console.log(`Written index.html – total pages: ${files.length}`);
+          }
+
+          run().catch(e => {
+            console.error('Capture script error:', e);
+            process.exit(1);
+          });
+          SCRIPT_END
+
+          # Run with a hard 100s limit (leaves 20s for zipping)
+          timeout 100 node capture.js
+          echo "Capture phase finished (or time limit reached)"
+
+      - name: Zip and send to user
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
+          DOCS_URL: ${{ inputs.docs_url }}
           TITLE: ${{ inputs.title }}
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
         run: |
-          SAFE_TITLE=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-40)
-          ZIP_NAME="${SAFE_TITLE}.zip"
+          # Derive safe filename from docs URL
+          SAFE_NAME=$(echo "$DOCS_URL" | sed -E 's#^https?://##; s/[^a-zA-Z0-9._-]/_/g; s/__+/_/g' | cut -c1-50)
+          [ -z "$SAFE_NAME" ] && SAFE_NAME=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-40)
+          ZIP_NAME="${SAFE_NAME}.zip"
 
-          # Zip whatever we downloaded
-          if [ -d "mirror/$SAFE_TITLE" ] && [ -n "$(ls -A mirror/$SAFE_TITLE 2>/dev/null)" ]; then
-            cd mirror
-            zip -r "../${ZIP_NAME}" "$SAFE_TITLE"
+          # Zip whatever was captured
+          if [ -d output ] && [ -n "$(ls -A output/*.html 2>/dev/null)" ]; then
+            cd output
+            zip -r "../${ZIP_NAME}" .
             cd ..
           else
-            # No files – notify user
             curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
                  -H "Content-Type: application/json" \
-                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"❌ Mirroring failed – nothing was downloaded.\", \"parse_mode\": \"Markdown\"}"
-            echo "No files to zip"
+                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"❌ No pages were captured within the time limit.\", \"parse_mode\": \"Markdown\"}"
+            echo "No files to send"
             exit 0
           fi
 
@@ -102,19 +205,18 @@ jobs:
           }
 
           if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
-            if try_upload "$ZIP_NAME" "$ZIP_NAME"; then
-              send_message "✅ *Documentation mirrored (up to depth 2):* \`$ZIP_NAME\`\n\n📱 Extract and open any \`.html\` file to browse offline."
+            if try_upload "$ZIP_NAME" "📚 ${SAFE_NAME}"; then
+              send_message "✅ *Docs captured:* \`$ZIP_NAME\`\n\n📱 Extract and open \`index.html\` to navigate offline."
             else
-              send_message "❌ Bale is unstable – unable to send file."
-              exit 0
+              send_message "❌ Bale unstable – upload failed."
             fi
           else
-            send_message "⚠️ Mirror too large – splitting into parts..."
+            send_message "⚠️ Archive too large – splitting..."
             rm "$ZIP_NAME"
-            cd mirror
-            zip -s 15m "../${ZIP_NAME}" "$SAFE_TITLE"
+            cd output
+            zip -s 15m "../${ZIP_NAME}" .
             cd ..
-            PARTS=$(ls "${SAFE_TITLE}.z"* "${SAFE_TITLE}.zip" 2>/dev/null | sort -V)
+            PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
             for part in $PARTS; do
               if ! try_upload "$part"; then
                 send_message "❌ Bale interrupted – could not send all parts."
@@ -122,7 +224,7 @@ jobs:
               fi
               sleep 1
             done
-            send_message "✅ *Documentation mirrored (split archive).* Extract and browse offline."
+            send_message "✅ *Docs captured (split archive).* Extract and open \`index.html\`."
           fi
 
       - name: Unlock worker queue
