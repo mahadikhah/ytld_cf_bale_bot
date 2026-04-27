@@ -38,7 +38,7 @@ jobs:
 
       - name: Discover pages and capture (2‑minute limit)
         id: capture
-        continue-on-error: true          # ← ensures the next step always runs
+        continue-on-error: true
         env:
           DOCS_URL: ${{ inputs.docs_url }}
           TITLE: ${{ inputs.title }}
@@ -52,7 +52,10 @@ jobs:
           const path = require('path');
 
           const baseUrl = process.env.DOCS_URL;
-          const origin = new URL(baseUrl).origin;
+          const baseOrigin = new URL(baseUrl).origin;
+          // Normalize path: ensure trailing slash so we match child pages correctly
+          let basePath = new URL(baseUrl).pathname;
+          if (!basePath.endsWith('/')) basePath += '/';
 
           function safeName(url) {
             return url
@@ -74,24 +77,30 @@ jobs:
               console.log(`Loading base page: ${baseUrl}`);
               await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-              const links = await page.evaluate((baseOrigin) => {
+              // Pass baseOrigin and basePath to the evaluate function
+              const links = await page.evaluate(({ origin, pathPrefix }) => {
                 const selectors = 'nav a[href], .sidebar a[href], .menu a[href], .toc a[href]';
                 const anchors = document.querySelectorAll(selectors);
                 const urls = new Set();
                 anchors.forEach(a => {
                   try {
                     const href = a.href;
-                    if (href && href.startsWith(baseOrigin)) {
-                      const clean = href.split('#')[0].replace(/\/$/, '');
-                      urls.add(clean);
-                    }
+                    if (!href || !href.startsWith(origin)) return;
+                    const hrefPath = new URL(href).pathname;
+                    // Include only pages under the given path
+                    if (!hrefPath.startsWith(pathPrefix)) return;
+                    // Remove hash and trailing slash for dedup
+                    const clean = href.split('#')[0].replace(/\/$/, '');
+                    urls.add(clean);
                   } catch(e) {}
                 });
-                urls.add(baseOrigin.replace(/\/$/, ''));
+                // Also include the original base page (cleaned)
+                const baseClean = origin + pathPrefix.replace(/\/$/, '');
+                urls.add(baseClean);
                 return Array.from(urls).slice(0, 30);
-              }, origin);
+              }, { origin: baseOrigin, pathPrefix: basePath });
 
-              console.log(`Found ${links.length} pages to capture`);
+              console.log(`Found ${links.length} pages under ${basePath}`);
               fs.writeFileSync('urls.txt', links.join('\n'));
 
               let captured = 0;
@@ -142,15 +151,12 @@ jobs:
           });
           SCRIPT_END
 
-          # Run with a hard 100s limit and capture exit code
           timeout 100 node capture.js
           EXIT_CODE=$?
           echo "Capture exited with code $EXIT_CODE"
-          # Exit 124 = timeout (acceptable), others = real failure
           if [ $EXIT_CODE -ne 0 ] && [ $EXIT_CODE -ne 124 ]; then
             echo "Real failure, but we'll still try to zip anything captured"
           fi
-          # Always continue – the next step will decide what to send
 
       - name: Zip and send to user
         env:
