@@ -1,4 +1,4 @@
-name: Webpage Download (Full MHTML)
+name: Webpage Download (Single HTML)
 
 on:
   workflow_dispatch:
@@ -21,39 +21,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache Puppeteer
+      - name: Cache SingleFile browser
         uses: actions/cache@v4
         with:
-          path: ~/.cache/puppeteer
-          key: puppeteer-${{ runner.os }}-${{ hashFiles('.github/workflows/getpage.yml') }}
+          path: ~/.local/share/single-file-cli
+          key: singlefile-${{ runner.os }}-${{ hashFiles('.github/workflows/getpage.yml') }}
 
-      - name: Setup Node & install Puppeteer
-        run: |
-          npm init -y
-          npm install puppeteer
+      - name: Install SingleFile CLI
+        run: npm install -g single-file-cli
 
-      - name: Download page as MHTML
+      - name: Capture page as single HTML
         env:
           PAGE_URL: ${{ inputs.page_url }}
         run: |
-          cat > capture.js << 'SCRIPT_END'
-          const puppeteer = require('puppeteer');
-          (async () => {
-            const browser = await puppeteer.launch({
-              args: ['--no-sandbox', '--disable-setuid-sandbox'],
-              headless: "new"
-            });
-            const page = await browser.newPage();
-            const cdp = await page.target().createCDPSession();
-            await page.goto(process.env.PAGE_URL, { waitUntil: 'networkidle0', timeout: 45000 });
-            const { data } = await cdp.send('Page.captureSnapshot', { format: 'mhtml' });
-            require('fs').writeFileSync('page.mhtml', data);
-            await browser.close();
-          })();
-          SCRIPT_END
-          node capture.js
+          single-file "$PAGE_URL" \
+            --output=page.html \
+            --browser-max-timeout=45000
 
-      - name: Generate safe filename and send
+      - name: Zip and send
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
@@ -62,15 +47,17 @@ jobs:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
         run: |
-          # Derive a safe name from the URL (use title as fallback)
+          # Derive safe filename from URL
           RAW_NAME=$(echo "$PAGE_URL" | sed -E 's#^https?://##; s#[^a-zA-Z0-9./_-]#_#g; s#/+#_#g' | tr -s '_' | sed 's/_$//')
-          # Trim to 60 chars
           SAFE_NAME=$(echo "$RAW_NAME" | cut -c1-60)
-          # Ensure non‑empty
           [ -z "$SAFE_NAME" ] && SAFE_NAME=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-40)
-          echo "Safe file name: $SAFE_NAME"
+          echo "Safe filename: $SAFE_NAME"
 
-          FILE_SIZE=$(stat -c%s page.mhtml)
+          # Zip the HTML file
+          cp page.html "${SAFE_NAME}.html"
+          zip -j "${SAFE_NAME}.zip" "${SAFE_NAME}.html"
+
+          ZIP_SIZE=$(stat -c%s "${SAFE_NAME}.zip")
           MAX_SIZE=$((20 * 1024 * 1024))
 
           send_message() {
@@ -79,7 +66,6 @@ jobs:
                  -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$1\", \"parse_mode\": \"Markdown\"}"
           }
 
-          # Retry upload (1‑2 attempts)
           try_upload() {
             local file="$1"; local caption="$2"
             for attempt in 1 2; do
@@ -101,41 +87,27 @@ jobs:
             return 1
           }
 
-          if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
-            echo "File size $(($FILE_SIZE / 1024 / 1024)) MB – sending as single MHTML"
-            # Send the MHTML file directly (no zip) so mobile can open it
-            if try_upload "page.mhtml" "${SAFE_NAME}.mhtml"; then
-              send_message "✅ *Saved webpage:* \`${SAFE_NAME}.mhtml\`\n\n📱 *How to open on mobile:*\n1. Download a file manager app (e.g. Files).\n2. Tap the file and choose *Open with → Chrome*.\n💻 On desktop just double‑click."
+          if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
+            echo "Zip size $(($ZIP_SIZE / 1024 / 1024)) MB – direct send"
+            if try_upload "${SAFE_NAME}.zip" "${SAFE_NAME}.zip"; then
+              send_message "✅ *Saved webpage:* \`${SAFE_NAME}.zip\`\n\n📱 *How to view:*\n1. Extract the zip.\n2. Open the \`.html\` file with Chrome (or any browser).\n🌐 Works perfectly on mobile!"
             else
-              send_message "❌ Bale is currently unstable – unable to send file. Please try again later."
+              send_message "❌ Bale is currently unstable – unable to send file. Try again later."
               exit 0
             fi
           else
-            echo "File too large – zipping and splitting"
-            mv page.mhtml "${SAFE_NAME}.mhtml"
-            zip -FF "${SAFE_NAME}.zip" "${SAFE_NAME}.mhtml"  # create a zip (only one file inside)
-            ZIP_SIZE=$(stat -c%s "${SAFE_NAME}.zip")
-            if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
-              # Single zip fits
-              if try_upload "${SAFE_NAME}.zip" "${SAFE_NAME}.zip"; then
-                send_message "✅ *Saved webpage (zipped):* \`${SAFE_NAME}.zip\`\n\n📱 *How to open:*\n1. Extract the zip.\n2. Open the \`.mhtml\` file with Chrome."
-              else
-                send_message "❌ Bale unstable – upload failed."
+            echo "Zip too large – splitting"
+            # Create split zip from safe_name.zip
+            zip -s 15m "${SAFE_NAME}.zip" "${SAFE_NAME}.html"
+            PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
+            for part in $PARTS; do
+              if ! try_upload "$part"; then
+                send_message "❌ Bale interrupted – couldn't send all parts."
                 exit 0
               fi
-            else
-              # Split the zip
-              zip -s 15m "${SAFE_NAME}.zip" "${SAFE_NAME}.mhtml"
-              PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
-              for part in $PARTS; do
-                if ! try_upload "$part"; then
-                  send_message "❌ Bale interrupted – could not send all parts."
-                  exit 0
-                fi
-                sleep 1
-              done
-              send_message "✅ *Saved webpage (split archive):*\n\n📥 Download all parts and extract the \`.zip\` file to get the webpage.\nThen open the \`.mhtml\` with Chrome."
-            fi
+              sleep 1
+            done
+            send_message "✅ *Saved webpage (split archive).*\n\nExtract all parts, then open the HTML file with your browser."
           fi
 
       - name: Unlock worker queue
