@@ -218,59 +218,83 @@ jobs:
                  -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$1\", \"parse_mode\": \"Markdown\"}"
           }
 
-          if [ -d output ] && [ -n "$(ls -A output/*.html 2>/dev/null)" ]; then
+          if [ ! -d output ] || [ -z "$(ls -A output/*.html 2>/dev/null)" ]; then
+            send_message "❌ No pages were captured. The site might be too heavy or unreachable."
+            exit 0
+          fi
+
+          # Create zip if not already created by the capture step
+          if [ ! -f "$ZIP_NAME" ]; then
             cd output
             zip -r "../${ZIP_NAME}" .
             cd ..
-
-            ZIP_SIZE=$(stat -c%s "$ZIP_NAME")
-            MAX_SIZE=$((20 * 1024 * 1024))
-
-            try_upload() {
-              local file="$1"; local caption="$2"
-              for attempt in 1 2; do
-                if [ -n "$caption" ]; then
-                  RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" -F "caption=$caption" \
-                             "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
-                else
-                  RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" \
-                             "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
-                fi
-                HTTP_CODE=$(echo "$RESPONSE" | tail -c 4)
-                BODY=$(echo "$RESPONSE" | head -c -4)
-                if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then return 0; fi
-                [ $attempt -lt 2 ] && sleep 1
-              done
-              return 1
-            }
-
-            if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
-              if try_upload "$ZIP_NAME" "📚 ${SAFE_NAME}"; then
-                PAGES=$(unzip -Z1 "$ZIP_NAME" | grep -c '\.html$')
-                send_message "✅ *Docs captured:* \`$ZIP_NAME\` ($PAGES pages)\n\n📱 Extract and open \`index.html\` to navigate offline."
-              else
-                send_message "❌ Bale unstable – upload failed."
-              fi
-            else
-              send_message "⚠️ Archive too large – splitting..."
-              rm "$ZIP_NAME"
-              cd output
-              zip -s 15m "../${ZIP_NAME}" .
-              cd ..
-              PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
-              for part in $PARTS; do
-                if ! try_upload "$part"; then
-                  send_message "❌ Bale interrupted – could not send all parts."
-                  exit 0
-                fi
-                sleep 1
-              done
-              send_message "✅ *Docs captured (split archive).* Extract and open \`index.html\`."
-            fi
-          else
-            send_message "❌ No pages were captured. The site might be too heavy or unreachable."
           fi
 
+          ZIP_SIZE=$(stat -c%s "$ZIP_NAME")
+          MAX_SIZE=$((20 * 1024 * 1024))
+
+          try_upload() {
+            local file="$1"; local caption="$2"
+            for attempt in 1 2; do
+              if [ -n "$caption" ]; then
+                RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" -F "caption=$caption" \
+                           "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+              else
+                RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" \
+                           "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+              fi
+              HTTP_CODE=$(echo "$RESPONSE" | tail -c 4)
+              BODY=$(echo "$RESPONSE" | head -c -4)
+              if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then
+                echo "Upload successful on attempt $attempt"
+                return 0
+              fi
+              [ $attempt -lt 2 ] && sleep 1
+            done
+            return 1
+          }
+
+          if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
+            echo "Zip size $(($ZIP_SIZE / 1024 / 1024)) MB – sending directly"
+            if try_upload "$ZIP_NAME" "📚 ${SAFE_NAME}"; then
+              PAGES=$(unzip -Z1 "$ZIP_NAME" | grep -c '\.html$')
+              send_message "✅ *Docs captured:* \`$ZIP_NAME\` ($PAGES pages)\n\n📱 Extract and open \`index.html\` to navigate offline."
+            else
+              send_message "❌ Bale unstable – upload failed."
+            fi
+          else
+            echo "Archive too large – splitting..."
+            # Split the existing zip. This creates SAFE_NAME.z01, SAFE_NAME.z02, ..., SAFE_NAME.zip (the last one)
+            zip -s 15m "${ZIP_NAME}" --out "${SAFE_NAME}_split.zip" || true
+            # Remove original large zip and rename split files
+            rm -f "$ZIP_NAME"
+            PARTS=$(ls "${SAFE_NAME}_split".z* "${SAFE_NAME}_split".zip 2>/dev/null | sort -V)
+            # If split failed, try a different approach: split the original and rename
+            if [ -z "$PARTS" ]; then
+              zip -s 15m "${ZIP_NAME}" --out "${SAFE_NAME}_split.zip" || {
+                send_message "❌ Failed to split the archive."
+                exit 0
+              }
+              rm -f "$ZIP_NAME"
+              PARTS=$(ls "${SAFE_NAME}_split".z* "${SAFE_NAME}_split".zip 2>/dev/null | sort -V)
+            fi
+
+            if [ -z "$PARTS" ]; then
+              send_message "❌ Splitting failed – please try a smaller section or reduce capture time."
+              exit 0
+            fi
+
+            for part in $PARTS; do
+              echo "Uploading part: $part"
+              if ! try_upload "$part"; then
+                send_message "❌ Bale interrupted – could not send all parts."
+                exit 0
+              fi
+              sleep 1
+            done
+            send_message "✅ *Docs captured (split archive).* Extract the files and open \`index.html\`."
+          fi
+          
       - name: Unlock worker queue
         if: always()
         env:
