@@ -10,7 +10,7 @@ on:
         description: 'Page URL to download'
         required: true
       title:
-        description: 'Page title'
+        description: 'Page title (for fallback name)'
         default: 'webpage'
 
 jobs:
@@ -53,19 +53,25 @@ jobs:
           SCRIPT_END
           node capture.js
 
-      - name: Zip & send (same as before, but only one file)
+      - name: Generate safe filename and send
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
+          PAGE_URL: ${{ inputs.page_url }}
           TITLE: ${{ inputs.title }}
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
         run: |
-          # Zip the .mhtml file (optional, but keeps consistent handling)
-          zip page.zip page.mhtml
-          FILE_SIZE=$(stat -c%s page.zip)
+          # Derive a safe name from the URL (use title as fallback)
+          RAW_NAME=$(echo "$PAGE_URL" | sed -E 's#^https?://##; s#[^a-zA-Z0-9./_-]#_#g; s#/+#_#g' | tr -s '_' | sed 's/_$//')
+          # Trim to 60 chars
+          SAFE_NAME=$(echo "$RAW_NAME" | cut -c1-60)
+          # Ensure non‑empty
+          [ -z "$SAFE_NAME" ] && SAFE_NAME=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-40)
+          echo "Safe file name: $SAFE_NAME"
+
+          FILE_SIZE=$(stat -c%s page.mhtml)
           MAX_SIZE=$((20 * 1024 * 1024))
-          SAFE_TITLE=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-45)
 
           send_message() {
             curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
@@ -73,6 +79,7 @@ jobs:
                  -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$1\", \"parse_mode\": \"Markdown\"}"
           }
 
+          # Retry upload (1‑2 attempts)
           try_upload() {
             local file="$1"; local caption="$2"
             for attempt in 1 2; do
@@ -85,23 +92,50 @@ jobs:
               fi
               HTTP_CODE=$(echo "$RESPONSE" | tail -c 4)
               BODY=$(echo "$RESPONSE" | head -c -4)
-              if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then return 0; fi
+              if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then
+                echo "Upload successful on attempt $attempt"
+                return 0
+              fi
               [ $attempt -lt 2 ] && sleep 1
             done
             return 1
           }
 
           if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
-            echo "Sending MHTML zip (${FILE_SIZE} bytes)"
-            if try_upload "page.zip" "$SAFE_TITLE"; then
-              echo "Sent"
+            echo "File size $(($FILE_SIZE / 1024 / 1024)) MB – sending as single MHTML"
+            # Send the MHTML file directly (no zip) so mobile can open it
+            if try_upload "page.mhtml" "${SAFE_NAME}.mhtml"; then
+              send_message "✅ *Saved webpage:* \`${SAFE_NAME}.mhtml\`\n\n📱 *How to open on mobile:*\n1. Download a file manager app (e.g. Files).\n2. Tap the file and choose *Open with → Chrome*.\n💻 On desktop just double‑click."
             else
-              send_message "❌ Bale is unstable – unable to send file."
+              send_message "❌ Bale is currently unstable – unable to send file. Please try again later."
               exit 0
             fi
           else
-            send_message "⚠️ The MHTML file is too large even after zipping. Please download it manually: ${{ inputs.page_url }}"
-            exit 0
+            echo "File too large – zipping and splitting"
+            mv page.mhtml "${SAFE_NAME}.mhtml"
+            zip -FF "${SAFE_NAME}.zip" "${SAFE_NAME}.mhtml"  # create a zip (only one file inside)
+            ZIP_SIZE=$(stat -c%s "${SAFE_NAME}.zip")
+            if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
+              # Single zip fits
+              if try_upload "${SAFE_NAME}.zip" "${SAFE_NAME}.zip"; then
+                send_message "✅ *Saved webpage (zipped):* \`${SAFE_NAME}.zip\`\n\n📱 *How to open:*\n1. Extract the zip.\n2. Open the \`.mhtml\` file with Chrome."
+              else
+                send_message "❌ Bale unstable – upload failed."
+                exit 0
+              fi
+            else
+              # Split the zip
+              zip -s 15m "${SAFE_NAME}.zip" "${SAFE_NAME}.mhtml"
+              PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
+              for part in $PARTS; do
+                if ! try_upload "$part"; then
+                  send_message "❌ Bale interrupted – could not send all parts."
+                  exit 0
+                fi
+                sleep 1
+              done
+              send_message "✅ *Saved webpage (split archive):*\n\n📥 Download all parts and extract the \`.zip\` file to get the webpage.\nThen open the \`.mhtml\` with Chrome."
+            fi
           fi
 
       - name: Unlock worker queue
