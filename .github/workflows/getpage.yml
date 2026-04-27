@@ -30,10 +30,9 @@ jobs:
           PAGE_URL: ${{ inputs.page_url }}
         run: |
           echo "Starting single-file capture..."
-          echo '["--no-sandbox","--disable-setuid-sandbox"]' > browser_args.json
-          
           single-file "$PAGE_URL" page.html \
-            --browser-args-file=browser_args.json \
+            --browser-arg="--no-sandbox" \
+            --browser-arg="--disable-setuid-sandbox" \
             --browser-load-max-time=45000 \
             --browser-capture-max-time=45000 \
             --browser-wait-until="networkIdle" \
@@ -45,7 +44,7 @@ jobs:
             tail -20 single-file.log
             exit 1
           fi
-
+          
       - name: Zip and send
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
