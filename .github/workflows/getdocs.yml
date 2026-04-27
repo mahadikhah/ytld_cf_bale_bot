@@ -53,7 +53,6 @@ jobs:
 
           const baseUrl = process.env.DOCS_URL;
           const baseOrigin = new URL(baseUrl).origin;
-          // Normalize path: ensure trailing slash so we match child pages correctly
           let basePath = new URL(baseUrl).pathname;
           if (!basePath.endsWith('/')) basePath += '/';
 
@@ -63,6 +62,26 @@ jobs:
               .replace(/[^a-zA-Z0-9\/\-]/g, '_')
               .replace(/\//g, '_')
               .substring(0, 80) + '.html';
+          }
+
+          async function collectLinks(page, origin, pathPrefix) {
+            return await page.evaluate(({ origin, pathPrefix }) => {
+              const anchors = document.querySelectorAll('a[href]');
+              const urls = new Set();
+              anchors.forEach(a => {
+                try {
+                  const href = a.href;
+                  if (!href || !href.startsWith(origin)) return;
+                  const hrefPath = new URL(href).pathname;
+                  if (!hrefPath.startsWith(pathPrefix)) return;
+                  const clean = href.split('#')[0].replace(/\/$/, '');
+                  urls.add(clean);
+                } catch(e) {}
+              });
+              // Add the starting page itself (cleaned)
+              urls.add(origin + pathPrefix.replace(/\/$/, ''));
+              return Array.from(urls).slice(0, 30);
+            }, { origin, pathPrefix });
           }
 
           async function run() {
@@ -77,28 +96,18 @@ jobs:
               console.log(`Loading base page: ${baseUrl}`);
               await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-              // Pass baseOrigin and basePath to the evaluate function
-              const links = await page.evaluate(({ origin, pathPrefix }) => {
-                const selectors = 'nav a[href], .sidebar a[href], .menu a[href], .toc a[href]';
-                const anchors = document.querySelectorAll(selectors);
-                const urls = new Set();
-                anchors.forEach(a => {
-                  try {
-                    const href = a.href;
-                    if (!href || !href.startsWith(origin)) return;
-                    const hrefPath = new URL(href).pathname;
-                    // Include only pages under the given path
-                    if (!hrefPath.startsWith(pathPrefix)) return;
-                    // Remove hash and trailing slash for dedup
-                    const clean = href.split('#')[0].replace(/\/$/, '');
-                    urls.add(clean);
-                  } catch(e) {}
-                });
-                // Also include the original base page (cleaned)
-                const baseClean = origin + pathPrefix.replace(/\/$/, '');
-                urls.add(baseClean);
-                return Array.from(urls).slice(0, 30);
-              }, { origin: baseOrigin, pathPrefix: basePath });
+              let links = await collectLinks(page, baseOrigin, basePath);
+
+              // If we got very few links, try the first internal page to get full nav
+              if (links.length <= 2) {
+                // Find the first link that is NOT the exact base page
+                const altLink = links.find(l => l !== baseUrl.replace(/\/$/, ''));
+                if (altLink) {
+                  console.log(`Too few links – jumping to ${altLink} for navigation`);
+                  await page.goto(altLink, { waitUntil: 'networkidle2', timeout: 30000 });
+                  links = await collectLinks(page, baseOrigin, basePath);
+                }
+              }
 
               console.log(`Found ${links.length} pages under ${basePath}`);
               fs.writeFileSync('urls.txt', links.join('\n'));
@@ -158,6 +167,7 @@ jobs:
             echo "Real failure, but we'll still try to zip anything captured"
           fi
 
+          
       - name: Zip and send to user
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
