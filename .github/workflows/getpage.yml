@@ -33,19 +33,22 @@ jobs:
           npm install puppeteer
 
       - name: Download page as MHTML
-        run: node -e "
+        env:
+          PAGE_URL: ${{ inputs.page_url }}
+        run: |
+          cat > capture.js << 'SCRIPT_END'
           const puppeteer = require('puppeteer');
           (async () => {
             const browser = await puppeteer.launch();
             const page = await browser.newPage();
             const cdp = await page.target().createCDPSession();
-            const url = process.env.PAGE_URL;
-            await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+            await page.goto(process.env.PAGE_URL, { waitUntil: 'networkidle0', timeout: 30000 });
             const { data } = await cdp.send('Page.captureSnapshot', { format: 'mhtml' });
             require('fs').writeFileSync('page.mhtml', data);
             await browser.close();
           })();
-        " --env PAGE_URL="${{ inputs.page_url }}"
+          SCRIPT_END
+          node capture.js
 
       - name: Zip & send (same as before, but only one file)
         env:
