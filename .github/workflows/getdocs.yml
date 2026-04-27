@@ -16,7 +16,7 @@ on:
 jobs:
   mirror-and-send:
     runs-on: ubuntu-latest
-    timeout-minutes: 5            # overall max (2min capturing + zip + upload)
+    timeout-minutes: 5
 
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +37,8 @@ jobs:
           npm install puppeteer single-file-cli
 
       - name: Discover pages and capture (2‑minute limit)
+        id: capture
+        continue-on-error: true          # ← ensures the next step always runs
         env:
           DOCS_URL: ${{ inputs.docs_url }}
           TITLE: ${{ inputs.title }}
@@ -52,7 +54,6 @@ jobs:
           const baseUrl = process.env.DOCS_URL;
           const origin = new URL(baseUrl).origin;
 
-          // Generate safe filename from a URL path
           function safeName(url) {
             return url
               .replace(/^https?:\/\//, '')
@@ -73,7 +74,6 @@ jobs:
               console.log(`Loading base page: ${baseUrl}`);
               await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-              // Collect all internal links from common doc navigation areas
               const links = await page.evaluate((baseOrigin) => {
                 const selectors = 'nav a[href], .sidebar a[href], .menu a[href], .toc a[href]';
                 const anchors = document.querySelectorAll(selectors);
@@ -82,13 +82,11 @@ jobs:
                   try {
                     const href = a.href;
                     if (href && href.startsWith(baseOrigin)) {
-                      // Remove hash and trailing slash for dedup
                       const clean = href.split('#')[0].replace(/\/$/, '');
                       urls.add(clean);
                     }
                   } catch(e) {}
                 });
-                // Also include the base URL itself
                 urls.add(baseOrigin.replace(/\/$/, ''));
                 return Array.from(urls).slice(0, 30);
               }, origin);
@@ -96,14 +94,13 @@ jobs:
               console.log(`Found ${links.length} pages to capture`);
               fs.writeFileSync('urls.txt', links.join('\n'));
 
-              // Capture each page (will be interrupted after ~2 minutes by external timeout)
               let captured = 0;
               for (const url of links) {
                 const filename = safeName(url);
                 const outputPath = path.join('output', filename);
 
                 if (fs.existsSync(outputPath)) {
-                  console.log(`Skipping already captured: ${filename}`);
+                  console.log(`Skipping: ${filename}`);
                   continue;
                 }
 
@@ -128,7 +125,6 @@ jobs:
               await browser.close();
             }
 
-            // Create a simple index.html
             const files = fs.readdirSync('output').filter(f => f.endsWith('.html'));
             let indexHtml = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Docs Mirror</title></head><body><h1>Documentation</h1><ul>';
             files.forEach(f => {
@@ -146,9 +142,15 @@ jobs:
           });
           SCRIPT_END
 
-          # Run with a hard 100s limit (leaves 20s for zipping)
+          # Run with a hard 100s limit and capture exit code
           timeout 100 node capture.js
-          echo "Capture phase finished (or time limit reached)"
+          EXIT_CODE=$?
+          echo "Capture exited with code $EXIT_CODE"
+          # Exit 124 = timeout (acceptable), others = real failure
+          if [ $EXIT_CODE -ne 0 ] && [ $EXIT_CODE -ne 124 ]; then
+            echo "Real failure, but we'll still try to zip anything captured"
+          fi
+          # Always continue – the next step will decide what to send
 
       - name: Zip and send to user
         env:
@@ -159,26 +161,9 @@ jobs:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
         run: |
-          # Derive safe filename from docs URL
           SAFE_NAME=$(echo "$DOCS_URL" | sed -E 's#^https?://##; s/[^a-zA-Z0-9._-]/_/g; s/__+/_/g' | cut -c1-50)
           [ -z "$SAFE_NAME" ] && SAFE_NAME=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-40)
           ZIP_NAME="${SAFE_NAME}.zip"
-
-          # Zip whatever was captured
-          if [ -d output ] && [ -n "$(ls -A output/*.html 2>/dev/null)" ]; then
-            cd output
-            zip -r "../${ZIP_NAME}" .
-            cd ..
-          else
-            curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
-                 -H "Content-Type: application/json" \
-                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"❌ No pages were captured within the time limit.\", \"parse_mode\": \"Markdown\"}"
-            echo "No files to send"
-            exit 0
-          fi
-
-          ZIP_SIZE=$(stat -c%s "$ZIP_NAME")
-          MAX_SIZE=$((20 * 1024 * 1024))
 
           send_message() {
             curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
@@ -186,45 +171,57 @@ jobs:
                  -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$1\", \"parse_mode\": \"Markdown\"}"
           }
 
-          try_upload() {
-            local file="$1"; local caption="$2"
-            for attempt in 1 2; do
-              if [ -n "$caption" ]; then
-                RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" -F "caption=$caption" \
-                           "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
-              else
-                RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" \
-                           "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
-              fi
-              HTTP_CODE=$(echo "$RESPONSE" | tail -c 4)
-              BODY=$(echo "$RESPONSE" | head -c -4)
-              if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then return 0; fi
-              [ $attempt -lt 2 ] && sleep 1
-            done
-            return 1
-          }
+          if [ -d output ] && [ -n "$(ls -A output/*.html 2>/dev/null)" ]; then
+            cd output
+            zip -r "../${ZIP_NAME}" .
+            cd ..
 
-          if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
-            if try_upload "$ZIP_NAME" "📚 ${SAFE_NAME}"; then
-              send_message "✅ *Docs captured:* \`$ZIP_NAME\`\n\n📱 Extract and open \`index.html\` to navigate offline."
+            ZIP_SIZE=$(stat -c%s "$ZIP_NAME")
+            MAX_SIZE=$((20 * 1024 * 1024))
+
+            try_upload() {
+              local file="$1"; local caption="$2"
+              for attempt in 1 2; do
+                if [ -n "$caption" ]; then
+                  RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" -F "caption=$caption" \
+                             "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+                else
+                  RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" \
+                             "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+                fi
+                HTTP_CODE=$(echo "$RESPONSE" | tail -c 4)
+                BODY=$(echo "$RESPONSE" | head -c -4)
+                if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then return 0; fi
+                [ $attempt -lt 2 ] && sleep 1
+              done
+              return 1
+            }
+
+            if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
+              if try_upload "$ZIP_NAME" "📚 ${SAFE_NAME}"; then
+                PAGES=$(unzip -Z1 "$ZIP_NAME" | grep -c '\.html$')
+                send_message "✅ *Docs captured:* \`$ZIP_NAME\` ($PAGES pages)\n\n📱 Extract and open \`index.html\` to navigate offline."
+              else
+                send_message "❌ Bale unstable – upload failed."
+              fi
             else
-              send_message "❌ Bale unstable – upload failed."
+              send_message "⚠️ Archive too large – splitting..."
+              rm "$ZIP_NAME"
+              cd output
+              zip -s 15m "../${ZIP_NAME}" .
+              cd ..
+              PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
+              for part in $PARTS; do
+                if ! try_upload "$part"; then
+                  send_message "❌ Bale interrupted – could not send all parts."
+                  exit 0
+                fi
+                sleep 1
+              done
+              send_message "✅ *Docs captured (split archive).* Extract and open \`index.html\`."
             fi
           else
-            send_message "⚠️ Archive too large – splitting..."
-            rm "$ZIP_NAME"
-            cd output
-            zip -s 15m "../${ZIP_NAME}" .
-            cd ..
-            PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
-            for part in $PARTS; do
-              if ! try_upload "$part"; then
-                send_message "❌ Bale interrupted – could not send all parts."
-                exit 0
-              fi
-              sleep 1
-            done
-            send_message "✅ *Docs captured (split archive).* Extract and open \`index.html\`."
+            send_message "❌ No pages were captured. The site might be too heavy or unreachable."
           fi
 
       - name: Unlock worker queue
