@@ -1,0 +1,127 @@
+name: Mirror Documentation Site
+
+on:
+  workflow_dispatch:
+    inputs:
+      chat_id:
+        description: 'Bale chat ID'
+        required: true
+      docs_url:
+        description: 'Base URL of the docs (e.g., https://filamentphp.com/docs/5.x/)'
+        required: true
+      title:
+        description: 'Site name (for zip filename)'
+        default: 'docs-mirror'
+
+jobs:
+  mirror-and-send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mirror site with wget
+        env:
+          DOCS_URL: ${{ inputs.docs_url }}
+          TITLE: ${{ inputs.title }}
+        run: |
+          SAFE_TITLE=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-40)
+          mkdir -p "mirror/$SAFE_TITLE"
+          cd "mirror/$SAFE_TITLE"
+
+          wget \
+            --mirror \
+            --page-requisites \
+            --adjust-extension \
+            --convert-links \
+            --span-hosts \
+            --execute robots=off \
+            --no-verbose \
+            --wait=0.5 \
+            --timeout=10 \
+            --tries=2 \
+            --reject='*.exe,*.dll,*.bat,*.sh,*.cgi,*.php,*.py' \
+            --limit-rate=500k \
+            --directory-prefix=. \
+            "${{ inputs.docs_url }}" || true
+
+      - name: Zip and send
+        env:
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.chat_id }}
+          TITLE: ${{ inputs.title }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+        run: |
+          SAFE_TITLE=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-40)
+          ZIP_NAME="${SAFE_TITLE}.zip"
+
+          cd mirror
+          zip -r "../${ZIP_NAME}" "$SAFE_TITLE"
+          cd ..
+
+          ZIP_SIZE=$(stat -c%s "$ZIP_NAME")
+          MAX_SIZE=$((20 * 1024 * 1024))
+
+          send_message() {
+            curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$1\", \"parse_mode\": \"Markdown\"}"
+          }
+
+          try_upload() {
+            local file="$1"; local caption="$2"
+            for attempt in 1 2; do
+              if [ -n "$caption" ]; then
+                RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" -F "caption=$caption" \
+                           "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+              else
+                RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" \
+                           "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+              fi
+              HTTP_CODE=$(echo "$RESPONSE" | tail -c 4)
+              BODY=$(echo "$RESPONSE" | head -c -4)
+              if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then return 0; fi
+              [ $attempt -lt 2 ] && sleep 1
+            done
+            return 1
+          }
+
+          if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
+            if try_upload "$ZIP_NAME" "$ZIP_NAME"; then
+              send_message "✅ *Documentation mirrored:* \`$ZIP_NAME\`\n\n📱 Extract the zip and open any \`.html\` file – the whole site works offline."
+            else
+              send_message "❌ Bale is unstable – unable to send file. Please try again later."
+              exit 0
+            fi
+          else
+            send_message "⚠️ The mirror is too large, splitting into parts..."
+            # Split the zip
+            rm "$ZIP_NAME"
+            cd mirror
+            zip -s 15m "../${ZIP_NAME}" "$SAFE_TITLE"
+            cd ..
+            PARTS=$(ls "${SAFE_TITLE}.z"* "${SAFE_TITLE}.zip" 2>/dev/null | sort -V)
+            for part in $PARTS; do
+              if ! try_upload "$part"; then
+                send_message "❌ Bale interrupted – could not send all parts."
+                exit 0
+              fi
+              sleep 1
+            done
+            send_message "✅ *Documentation mirrored (split archive):*\n\n📥 Download all parts, extract the \`.zip\` file, then open any HTML page to browse offline."
+          fi
+
+      - name: Unlock worker queue
+        if: always()
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          CHAT_ID: ${{ inputs.chat_id }}
+        run: |
+          if [ -n "$WORKER_URL" ] && [ -n "$WORKER_SECRET" ]; then
+            curl -s -X POST "$WORKER_URL/github/done" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"secret\": \"$WORKER_SECRET\", \"chat_id\": \"$CHAT_ID\"}"
+          fi

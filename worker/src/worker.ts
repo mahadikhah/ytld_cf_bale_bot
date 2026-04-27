@@ -469,6 +469,42 @@ async function processUpdate(env: Env, update: any) {
     );
     return;
   }
+
+    // ---------- Mirror documentation site ----------
+  if (text.startsWith("/getdocs ")) {
+    const url = text.slice(9).trim();
+    if (!url) return;
+
+    // Basic URL validation
+    if (!/^https?:\/\/.+\..+/.test(url)) {
+      await callBaleApi(env, "sendMessage", { chat_id: chatId, text: "❌ Invalid URL." });
+      return;
+    }
+
+    const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+    if (isQueued === "true") {
+      await callBaleApi(env, "sendMessage", { chat_id: chatId, text: "⚠️ You already have a download in progress." });
+      return;
+    }
+
+    await env.USER_PLANS.put(`dl_queue:${chatId}`, "true");
+    await callBaleApi(env, "sendMessage", {
+      chat_id: chatId,
+      text: `⏳ Mirroring documentation: \`${url}\`\nThis may take a few minutes…`,
+      parse_mode: "Markdown",
+    });
+
+    await triggerWorkflow(
+      env,
+      {
+        chat_id: chatId.toString(),
+        docs_url: url,
+        title: "docs",
+      },
+      "getdocs.yml"
+    );
+    return;
+  }
   
   const videoId = extractYouTubeId(text);
   if (videoId) {
