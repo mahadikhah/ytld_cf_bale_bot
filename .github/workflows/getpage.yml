@@ -30,9 +30,9 @@ jobs:
         run: |
           single-file "$PAGE_URL" \
             --output=page.html \
-            --browser-args="--no-sandbox --disable-setuid-sandbox" \
+            --browser-args='["--no-sandbox","--disable-setuid-sandbox"]' \
             --browser-max-timeout=45000
-
+            
       - name: Zip and send
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
