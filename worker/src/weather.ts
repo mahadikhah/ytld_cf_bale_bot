@@ -65,15 +65,20 @@ async function geocode(city: string): Promise<{ lat: number; lon: number; name: 
   return { lat: r.latitude, lon: r.longitude, name: r.name };
 }
 
-// ---------- Current local time ----------
+// ---------- Current local time (with fallback) ----------
 async function fetchLocalTime(lat: number, lon: number): Promise<{ time: string; timezone: string } | null> {
-  const url = `${TIMEZONE_URL}?latitude=${lat}&longitude=${lon}`;
-  const resp = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
-  if (!resp.ok) return null;
-  const data: any = await resp.json();
-  // data.time format: "2026-04-27T13:30:00+03:30"
-  // data.timezone: "Asia/Tehran"
-  return { time: data.time, timezone: data.timezone };
+  const url = `${TIMEZONE_URL}?latitude=${lat}&longitude=${lon}&timeformat=iso8601`;
+  try {
+    const resp = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+    if (!resp.ok) return null;
+    const data: any = await resp.json();
+    if (data && data.time && data.timezone) {
+      return { time: data.time, timezone: data.timezone };
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------- Forecast ----------
@@ -92,12 +97,11 @@ async function fetchForecast(lat: number, lon: number): Promise<any | null> {
   return resp.json();
 }
 
-// ---------- Extract hour string from ISO-like time (no offset) ----------
+// ---------- Helpers ----------
 function extractHour(isoTime: string): string {
-  // e.g., "2026-04-27T13:00"
   const parts = isoTime.split("T");
   if (parts.length < 2) return "";
-  const timePart = parts[1]; // "13:00"
+  const timePart = parts[1];
   const hour = timePart.split(":")[0];
   return hour.padStart(2, "0") + ":00";
 }
@@ -109,27 +113,30 @@ export async function getWeatherReport(city: string): Promise<string> {
   const forecast = await fetchForecast(geo.lat, geo.lon);
   if (!forecast) return "❌ Failed to fetch weather data. Please try again later.";
 
-  const localTime = await fetchLocalTime(geo.lat, geo.lon);
-  if (!localTime) return "❌ Could not determine local time for this location.";
-
-  // current local time string with offset, e.g., "2026-04-27T13:35:00+03:30"
-  // We strip the offset to match the forecast strings (which are in local time but without offset)
-  const currentIso = localTime.time.replace(/[+-]\d{2}:\d{2}$/, "").replace(/:\d{2}\.\d+Z?$/, "");
-  // Now "2026-04-27T13:35:00" or similar
-  const currentHourPrefix = currentIso.substring(0, 13); // "2026-04-27T13"
-  const currentHourFull = currentIso.substring(0, 16); // "2026-04-27T13:35" (not needed)
-
   const { hourly, daily } = forecast;
   const times = hourly.time as string[];
 
-  // Find first index where hour >= current hour
   let startIndex = 0;
-  for (let i = 0; i < times.length; i++) {
-    const entry = times[i].substring(0, 13); // "2026-04-27T13"
-    if (entry >= currentHourPrefix) {
-      startIndex = i;
-      break;
+  let timezoneDisplay = "";
+
+  // Try to get exact local time
+  const localTime = await fetchLocalTime(geo.lat, geo.lon);
+  if (localTime) {
+    // Parse the ISO time with offset, strip to local time string
+    const currentIso = localTime.time.replace(/[+-]\d{2}:\d{2}$/, "").replace(/\.\d+Z?$/, "");
+    const currentHourPrefix = currentIso.substring(0, 13); // "2026-04-27T13"
+    for (let i = 0; i < times.length; i++) {
+      if (times[i].substring(0, 13) >= currentHourPrefix) {
+        startIndex = i;
+        break;
+      }
     }
+    timezoneDisplay = `🕒 Local time: ${localTime.timezone}\n\n`;
+  } else {
+    // Fallback: use UTC to approximate (assume forecast times are local, and we use the first entry as "now")
+    // Actually just start from index 0 – the forecast's first hour is usually the current hour in that timezone.
+    // We'll add a note that time could not be verified.
+    timezoneDisplay = "⚠️ Could not verify local time; showing the latest available update.\n\n";
   }
 
   const next24 = times.slice(startIndex, startIndex + 24);
@@ -137,8 +144,9 @@ export async function getWeatherReport(city: string): Promise<string> {
   const codes = hourly.weathercode.slice(startIndex, startIndex + 24);
 
   let msg = `🌍 *Weather for ${escapeMarkdown(geo.name)}* (${geo.lat.toFixed(2)}, ${geo.lon.toFixed(2)})\n`;
-  msg += `🕒 Local time: ${localTime.timezone}\n\n`;
+  msg += timezoneDisplay;
 
+  // Hourly
   msg += "🕐 *Hourly (next 24 h):*\n";
   for (let i = 0; i < next24.length; i++) {
     const hour = extractHour(next24[i]);
@@ -147,7 +155,7 @@ export async function getWeatherReport(city: string): Promise<string> {
     msg += `┃ ${hour}  ${temp}°C  ${icon}\n`;
   }
 
-  // Daily – 7‑day
+  // Daily
   msg += "\n📅 *Daily (7‑day forecast):*\n";
   const dLen = Math.min(daily.time.length, 7);
   for (let i = 0; i < dLen; i++) {
