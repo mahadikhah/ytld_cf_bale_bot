@@ -39,10 +39,13 @@ jobs:
           cat > capture.js << 'SCRIPT_END'
           const puppeteer = require('puppeteer');
           (async () => {
-            const browser = await puppeteer.launch();
+            const browser = await puppeteer.launch({
+              args: ['--no-sandbox', '--disable-setuid-sandbox'],
+              headless: "new"
+            });
             const page = await browser.newPage();
             const cdp = await page.target().createCDPSession();
-            await page.goto(process.env.PAGE_URL, { waitUntil: 'networkidle0', timeout: 30000 });
+            await page.goto(process.env.PAGE_URL, { waitUntil: 'networkidle0', timeout: 45000 });
             const { data } = await cdp.send('Page.captureSnapshot', { format: 'mhtml' });
             require('fs').writeFileSync('page.mhtml', data);
             await browser.close();
