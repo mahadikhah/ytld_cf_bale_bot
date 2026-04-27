@@ -43,7 +43,7 @@ async function geocode(city: string): Promise<{ lat: number; lon: number; name: 
   return { lat: r.latitude, lon: r.longitude, name: r.name };
 }
 
-// ---------- Forecast fetch (now + hourly + daily) ----------
+// ---------- Forecast fetch ----------
 async function fetchForecast(lat: number, lon: number): Promise<any | null> {
   const params = new URLSearchParams({
     latitude: lat.toString(),
@@ -71,7 +71,20 @@ function isDaytime(time: string, sunrise: string, sunset: string): boolean {
   return time >= sunrise && time < sunset;
 }
 
-// ---------- Main export (now with offset) ----------
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function formatDateRange(firstTime: string, lastTime: string): string {
+  const firstDate = firstTime.substring(0, 10); // "2026-04-27"
+  const lastDate = lastTime.substring(0, 10);
+  const [y1, m1, d1] = firstDate.split("-");
+  const [y2, m2, d2] = lastDate.split("-");
+  const startStr = `${MONTHS[parseInt(m1)-1]} ${parseInt(d1)}`;
+  const endStr = `${MONTHS[parseInt(m2)-1]} ${parseInt(d2)}`;
+  if (firstDate === lastDate) return startStr;
+  return `${startStr} – ${endStr}`;
+}
+
+// ---------- Main export ----------
 export async function getWeatherReport(
   city: string,
   pageOffset = 0
@@ -82,12 +95,12 @@ export async function getWeatherReport(
   const fc = await fetchForecast(geo.lat, geo.lon);
   if (!fc) return null;
 
-  const currentTime = fc.current_weather?.time; // ISO local, e.g. "2026-04-27T14:00"
+  const currentTime = fc.current_weather?.time; // ISO local
   const timezone = fc.timezone || "local";
   const hourly = fc.hourly;
   const daily = fc.daily;
 
-  // Build sunrise/sunset map
+  // Sunrise/sunset map
   const dayMap: Record<string, { sunrise: string; sunset: string }> = {};
   for (let i = 0; i < daily.time.length; i++) {
     dayMap[daily.time[i]] = {
@@ -96,7 +109,7 @@ export async function getWeatherReport(
     };
   }
 
-  // Find start index for current hour (offset 0)
+  // Find base index (current hour)
   let baseIndex = 0;
   if (currentTime) {
     const prefix = currentTime.substring(0, 13);
@@ -115,16 +128,19 @@ export async function getWeatherReport(
     return { text: "No more forecast data available.", keyboard: [] };
   }
 
-  // Slice data
   const times = hourly.time.slice(startIndex, endIndex);
   const temps = hourly.temperature_2m.slice(startIndex, endIndex);
   const codes = hourly.weathercode.slice(startIndex, endIndex);
   const precip = hourly.precipitation_probability?.slice(startIndex, endIndex) ?? [];
   const wind = hourly.windspeed_10m?.slice(startIndex, endIndex) ?? [];
 
+  // Date range label
+  const dateRange = formatDateRange(times[0], times[times.length - 1]);
+
   // Build message
   let text = `🌍 *${escapeMarkdown(geo.name)}* (${geo.lat.toFixed(2)}, ${geo.lon.toFixed(2)})\n`;
-  text += `🕒 ${timezone}\n\n`;
+  text += `🕒 ${timezone}\n`;
+  text += `📆 ${dateRange}\n\n`;
   text += `🕐 *Hourly (${times.length} h)*\n`;
 
   for (let i = 0; i < times.length; i++) {
@@ -135,14 +151,13 @@ export async function getWeatherReport(
     const dayInfo = dayMap[datePart];
     const night = dayInfo ? !isDaytime(times[i], dayInfo.sunrise, dayInfo.sunset) : true;
     const icon = weatherIcon(code, night);
-
     const rainStr = precip.length ? ` 💧${precip[i]}%` : "";
     const windStr = wind.length ? ` 💨${wind[i].toFixed(1)}km/h` : "";
 
     text += `┃ ${hour}  ${temp}°C  ${icon}${rainStr}${windStr}\n`;
   }
 
-  // Daily summary (compact)
+  // Daily summary
   text += "\n📅 *7‑day Outlook*\n";
   for (let i = 0; i < Math.min(daily.time.length, 7); i++) {
     const date = new Date(daily.time[i] + "T00:00");
@@ -161,8 +176,8 @@ export async function getWeatherReport(
   const hasNext = pageOffset < maxOffset;
 
   const navRow: any[] = [];
-  if (hasPrev) navRow.push({ text: "⬅️ Previous 24h", callback_data: `weather|${encodeURIComponent(city)}|${pageOffset - 1}` });
-  if (hasNext) navRow.push({ text: "Next 24h ➡️", callback_data: `weather|${encodeURIComponent(city)}|${pageOffset + 1}` });
+  if (hasPrev) navRow.push({ text: " Previous 24h ➡️", callback_data: `weather|${encodeURIComponent(city)}|${pageOffset - 1}` });
+  if (hasNext) navRow.push({ text: "⬅️ Next 24h ", callback_data: `weather|${encodeURIComponent(city)}|${pageOffset + 1}` });
 
   const keyboard = navRow.length ? [navRow] : [];
   return { text, keyboard };
