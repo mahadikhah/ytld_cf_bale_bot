@@ -1,4 +1,4 @@
-name: Webpage Download (Single HTML)
+name: Webpage Download (Stealth Single HTML)
 
 on:
   workflow_dispatch:
@@ -21,38 +21,70 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install SingleFile CLI
-        run: npm install -g single-file-cli
+      # Cache Puppeteer browser & npm
+      - name: Cache Puppeteer
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/puppeteer
+            ~/.npm
+          key: ${{ runner.os }}-puppeteer-${{ hashFiles('.github/workflows/getpage.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-puppeteer-
 
+      - name: Setup Node & install dependencies
+        run: |
+          npm init -y
+          npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth single-file-cli
 
-      - name: Capture page as single HTML (with retry)
+      - name: Capture page (Stealth + SingleFile)
         env:
           PAGE_URL: ${{ inputs.page_url }}
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
         run: |
-          for attempt in 1 2; do
-            echo "Attempt $attempt..."
-            single-file "$PAGE_URL" page.html \
-              --browser-arg="--no-sandbox" \
-              --browser-arg="--disable-setuid-sandbox" \
-              --browser-load-max-time=45000 \
-              --browser-capture-max-time=45000 \
-              --browser-wait-until="networkIdle" && break
-            sleep 3
-          done
+          cat > capture.js << 'SCRIPT_END'
+          const puppeteer = require('puppeteer-extra');
+          const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+          puppeteer.use(StealthPlugin());
+          const { execSync } = require('child_process');
 
+          (async () => {
+            console.log('Launching stealth browser...');
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: ['--no-sandbox', '--disable-setuid-sandbox', '--remote-debugging-port=9222']
+            });
+
+            console.log(`Pre-warming page: ${process.env.PAGE_URL}`);
+            const page = await browser.newPage();
+
+            // Navigate and let page load (solves any challenges)
+            await page.goto(process.env.PAGE_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+              .catch(e => console.log('Navigation timeout (often ignorable)'));
+
+            try {
+              console.log('Connecting SingleFile to stealth browser...');
+              execSync(`npx single-file "${process.env.PAGE_URL}" page.html --browser-debug-port=9222 --browser-wait-until="networkIdle" --browser-load-max-time=45000 --browser-capture-max-time=45000`, { stdio: 'inherit' });
+            } catch(e) {
+              console.error('SingleFile failed, but page may still have been saved.');
+            } finally {
+              await browser.close();
+            }
+          })();
+          SCRIPT_END
+
+          node capture.js
+
+          # If still no file, notify user
           if [ ! -f page.html ]; then
-            echo "❌ Capture failed after retries"
-            # Notify the user that it failed
             curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
                  -H "Content-Type: application/json" \
-                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"❌ Sorry, the webpage could not be captured. The site might be too heavy or temporarily unavailable.\", \"parse_mode\": \"Markdown\"}"
+                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"❌ Sorry, the webpage could not be captured. It might be heavily protected or unavailable.\", \"parse_mode\": \"Markdown\"}"
             exit 1
           fi
 
-          
-      - name: Zip and send
+      - name: Zip and send to user
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
@@ -65,15 +97,8 @@ jobs:
           RAW_NAME=$(echo "$PAGE_URL" | sed -E 's#^https?://##; s#[^a-zA-Z0-9./_-]#_#g; s#/+#_#g' | tr -s '_' | sed 's/_$//')
           SAFE_NAME=$(echo "$RAW_NAME" | cut -c1-60)
           [ -z "$SAFE_NAME" ] && SAFE_NAME=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-40)
-          echo "Safe filename: $SAFE_NAME"
 
-          # Zip the HTML file
-          cp page.html "${SAFE_NAME}.html"
-          zip -j "${SAFE_NAME}.zip" "${SAFE_NAME}.html"
-
-          ZIP_SIZE=$(stat -c%s "${SAFE_NAME}.zip")
-          MAX_SIZE=$((20 * 1024 * 1024))
-
+          # Helper functions
           send_message() {
             curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
                  -H "Content-Type: application/json" \
@@ -81,7 +106,8 @@ jobs:
           }
 
           try_upload() {
-            local file="$1"; local caption="$2"
+            local file="$1"
+            local caption="$2"
             for attempt in 1 2; do
               if [ -n "$caption" ]; then
                 RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" -F "caption=$caption" \
@@ -101,26 +127,45 @@ jobs:
             return 1
           }
 
-          if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
-            echo "Zip size $(($ZIP_SIZE / 1024 / 1024)) MB – direct send"
-            if try_upload "${SAFE_NAME}.zip" "${SAFE_NAME}.zip"; then
-              send_message "✅ *Saved webpage:* \`${SAFE_NAME}.zip\`\n\n📱 *How to view:*\n1. Extract the zip.\n2. Open the \`.html\` file with Chrome (or any browser).\n🌐 Works perfectly on mobile!"
+          FILE_SIZE=$(stat -c%s page.html)
+          MAX_SIZE=$((20 * 1024 * 1024))
+
+          if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
+            echo "File size $(($FILE_SIZE / 1024 / 1024)) MB – sending directly"
+            mv page.html "${SAFE_NAME}.html"
+            if try_upload "${SAFE_NAME}.html" "${SAFE_NAME}.html"; then
+              send_message "✅ Saved webpage: \`${SAFE_NAME}.html\`\n\n📱 *How to open on mobile:* Download the file and tap it. It will instantly open in Chrome/Safari!"
             else
-              send_message "❌ Bale is currently unstable – unable to send file. Try again later."
+              send_message "❌ Bale is unstable – unable to send file."
               exit 0
             fi
           else
-            echo "Zip too large – splitting"
-            zip -s 15m "${SAFE_NAME}.zip" "${SAFE_NAME}.html"
-            PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
-            for part in $PARTS; do
-              if ! try_upload "$part"; then
-                send_message "❌ Bale interrupted – couldn't send all parts."
+            echo "File too large – zipping and possibly splitting"
+            mv page.html "${SAFE_NAME}.html"
+            zip -j "${SAFE_NAME}.zip" "${SAFE_NAME}.html"
+            ZIP_SIZE=$(stat -c%s "${SAFE_NAME}.zip")
+            if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
+              if try_upload "${SAFE_NAME}.zip" "${SAFE_NAME}.zip"; then
+                send_message "✅ Saved webpage (zipped): \`${SAFE_NAME}.zip\`\n\n📱 *How to open:*\n1. Extract the zip.\n2. Open the \`.html\` file."
+              else
+                send_message "❌ Bale unstable – upload failed."
                 exit 0
               fi
-              sleep 1
-            done
-            send_message "✅ *Saved webpage (split archive).*\n\nExtract all parts, then open the HTML file with your browser."
+            else
+              # Split the zip
+              # Remove original .zip, create split with -s 15m
+              rm "${SAFE_NAME}.zip"
+              zip -s 15m "${SAFE_NAME}.zip" "${SAFE_NAME}.html"
+              PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
+              for part in $PARTS; do
+                if ! try_upload "$part"; then
+                  send_message "❌ Bale interrupted – could not send all parts."
+                  exit 0
+                fi
+                sleep 1
+              done
+              send_message "✅ Saved webpage (split archive):\n\n📥 Download all parts, extract the \`.zip\` file, then tap the \`.html\` file."
+            fi
           fi
 
       - name: Unlock worker queue
