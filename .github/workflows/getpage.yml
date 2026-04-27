@@ -97,7 +97,13 @@ jobs:
           SAFE_NAME=$(echo "$RAW_NAME" | cut -c1-60)
           [ -z "$SAFE_NAME" ] && SAFE_NAME=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-40)
 
-          # Helper functions
+          # Always zip the HTML file
+          cp page.html "${SAFE_NAME}.html"
+          zip -j "${SAFE_NAME}.zip" "${SAFE_NAME}.html"
+
+          ZIP_SIZE=$(stat -c%s "${SAFE_NAME}.zip")
+          MAX_SIZE=$((20 * 1024 * 1024))
+
           send_message() {
             curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
                  -H "Content-Type: application/json" \
@@ -126,45 +132,28 @@ jobs:
             return 1
           }
 
-          FILE_SIZE=$(stat -c%s page.html)
-          MAX_SIZE=$((20 * 1024 * 1024))
-
-          if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
-            echo "File size $(($FILE_SIZE / 1024 / 1024)) MB – sending directly"
-            mv page.html "${SAFE_NAME}.html"
-            if try_upload "${SAFE_NAME}.html" "${SAFE_NAME}.html"; then
-              send_message "✅ Saved webpage: \`${SAFE_NAME}.html\`\n\n📱 *How to open on mobile:* Download the file and tap it. It will instantly open in Chrome/Safari!"
+          if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
+            echo "Zip size $(($ZIP_SIZE / 1024 / 1024)) MB – sending directly"
+            if try_upload "${SAFE_NAME}.zip" "${SAFE_NAME}.zip"; then
+              send_message "✅ Saved webpage: \`${SAFE_NAME}.zip\`\n\n📱 *How to view:*\n1. Extract the zip.\n2. Open the \`.html\` file with Chrome or any browser."
             else
               send_message "❌ Bale is unstable – unable to send file."
               exit 0
             fi
           else
-            echo "File too large – zipping and possibly splitting"
-            mv page.html "${SAFE_NAME}.html"
-            zip -j "${SAFE_NAME}.zip" "${SAFE_NAME}.html"
-            ZIP_SIZE=$(stat -c%s "${SAFE_NAME}.zip")
-            if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
-              if try_upload "${SAFE_NAME}.zip" "${SAFE_NAME}.zip"; then
-                send_message "✅ Saved webpage (zipped): \`${SAFE_NAME}.zip\`\n\n📱 *How to open:*\n1. Extract the zip.\n2. Open the \`.html\` file."
-              else
-                send_message "❌ Bale unstable – upload failed."
+            echo "Zip too large – splitting"
+            # Remove the original zip, create split with -s 15m
+            rm "${SAFE_NAME}.zip"
+            zip -s 15m "${SAFE_NAME}.zip" "${SAFE_NAME}.html"
+            PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
+            for part in $PARTS; do
+              if ! try_upload "$part"; then
+                send_message "❌ Bale interrupted – could not send all parts."
                 exit 0
               fi
-            else
-              # Split the zip
-              # Remove original .zip, create split with -s 15m
-              rm "${SAFE_NAME}.zip"
-              zip -s 15m "${SAFE_NAME}.zip" "${SAFE_NAME}.html"
-              PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
-              for part in $PARTS; do
-                if ! try_upload "$part"; then
-                  send_message "❌ Bale interrupted – could not send all parts."
-                  exit 0
-                fi
-                sleep 1
-              done
-              send_message "✅ Saved webpage (split archive):\n\n📥 Download all parts, extract the \`.zip\` file, then tap the \`.html\` file."
-            fi
+              sleep 1
+            done
+            send_message "✅ Saved webpage (split archive):\n\n📥 Download all parts, extract the \`.zip\` file, then tap the \`.html\` file."
           fi
 
       - name: Unlock worker queue
