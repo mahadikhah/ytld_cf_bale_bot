@@ -28,11 +28,27 @@ jobs:
         env:
           PAGE_URL: ${{ inputs.page_url }}
         run: |
+          echo "Starting single-file capture..."
+          # Write browser args to a JSON file to avoid shell escaping issues
+          echo '["--no-sandbox","--disable-setuid-sandbox"]' > browser_args.json
+          
+          # Run single-file with verbose output (stderr=stdout)
           single-file "$PAGE_URL" \
             --output=page.html \
-            --browser-args='["--no-sandbox","--disable-setuid-sandbox"]' \
-            --browser-max-timeout=45000
-            
+            --browser-args-file=browser_args.json \
+            --browser-max-timeout=45000 \
+            --browser-wait-until="networkidle0" \
+            --verbose 2>&1 | tee single-file.log
+
+          echo "Capture exit code: $?"
+          echo "Files in current directory:"
+          ls -la
+          
+          if [ ! -f page.html ]; then
+            echo "page.html not found. Last 20 lines of log:"
+            tail -20 single-file.log
+            exit 1
+          fi            
       - name: Zip and send
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
