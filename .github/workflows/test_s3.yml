@@ -1,19 +1,18 @@
-name: Test S3 Connection (ArvanCloud)
+name: Test S3 Pre-signed URL (Self-Test + Artifact)
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-s3:
+  test-presigned:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 2
 
     steps:
       - name: Install AWS CLI via pip
-        run: |
-          pip install --quiet awscli
+        run: pip install --quiet awscli
 
-      - name: Configure AWS CLI for ArvanCloud S3
+      - name: Configure AWS CLI
         env:
           S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
           S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
@@ -26,52 +25,56 @@ jobs:
           region = ${S3_REGION}
           output = json
           EOF
-
           cat > ~/.aws/credentials << EOF
           [default]
           aws_access_key_id = ${S3_ACCESS_KEY}
           aws_secret_access_key = ${S3_SECRET_KEY}
           EOF
-
           echo "S3_ENDPOINT=${S3_ENDPOINT}" >> $GITHUB_ENV
 
-      - name: Test CRUD operations
+      - name: Upload test file
         env:
           BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
         run: |
-          # Create test file
-          echo "Hello from GitHub Actions! Timestamp: $(date)" > test-file.txt
-          echo "✅ Created test file"
-
-          # Try to list buckets
-          echo "📋 Attempting to list buckets..."
-          aws s3 ls --endpoint-url $S3_ENDPOINT || echo "⚠️ Could not list buckets (may be restricted)"
-
-          # Upload
-          echo "⬆️ Uploading test file..."
+          echo "Test file content – $(date)" > test-file.txt
           aws s3 cp test-file.txt s3://${BUCKET_NAME}/test-file.txt --endpoint-url $S3_ENDPOINT
           echo "✅ Uploaded"
 
-          # List bucket contents
-          echo "📋 Listing bucket contents..."
-          aws s3 ls s3://${BUCKET_NAME}/ --endpoint-url $S3_ENDPOINT
+      - name: Generate presigned URL, validate, and save to file
+        env:
+          BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+        run: |
+          echo "Generating presigned URL (2 minute expiry)..."
+          PRESIGNED_URL=$(aws s3 presign s3://${BUCKET_NAME}/test-file.txt \
+            --endpoint-url $S3_ENDPOINT \
+            --expires-in 120)
 
-          # Download
-          echo "⬇️ Downloading test file..."
-          aws s3 cp s3://${BUCKET_NAME}/test-file.txt downloaded-test.txt --endpoint-url $S3_ENDPOINT
-          echo "✅ Downloaded"
+          # Write the URL to a file (will be uploaded as artifact)
+          echo "$PRESIGNED_URL" > presigned-url.txt
+          echo "📎 Presigned URL saved to presigned-url.txt"
 
-          # Verify content
-          if diff test-file.txt downloaded-test.txt; then
-            echo "✅ File content matches"
+          echo "Self-test: downloading file via presigned URL..."
+          curl -s -o downloaded-via-url.txt "$PRESIGNED_URL"
+
+          echo "Comparing content..."
+          if diff test-file.txt downloaded-via-url.txt; then
+            echo "✅ Presigned URL works perfectly – file content matches"
           else
-            echo "❌ File content mismatch"
+            echo "❌ Content mismatch"
             exit 1
           fi
 
-          # Delete
-          echo "🗑️ Deleting test file..."
-          aws s3 rm s3://${BUCKET_NAME}/test-file.txt --endpoint-url $S3_ENDPOINT
-          echo "✅ Deleted"
+      - name: Upload presigned URL as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: presigned-url
+          path: presigned-url.txt
+          retention-days: 1
 
-          echo "🎉 All CRUD operations successful!"
+      - name: Clean up test file from S3
+        if: always()
+        env:
+          BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+        run: |
+          aws s3 rm s3://${BUCKET_NAME}/test-file.txt --endpoint-url $S3_ENDPOINT
+          echo "🗑️ Test file removed"
