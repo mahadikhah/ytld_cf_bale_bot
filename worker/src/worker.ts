@@ -13,6 +13,7 @@ export interface Env {
   BALE_PAYMENT_TOKEN: string;
   ADMIN_CHAT_ID: string;
   WORKER_SECRET: string;
+  ENABLE_S3: string;                  // "true" to show S3 button
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -43,9 +44,9 @@ async function callBaleApi(env: Env, method: string, body: any) {
 }
 
 async function triggerWorkflow(
-  env: Env, 
+  env: Env,
   inputs: Record<string, string>,
-  workflowFile = "bot.yml"   // <-- new parameter with default
+  workflowFile = "bot.yml"
 ) {
   if (!env.GITHUB_REPO) throw new Error('GITHUB_REPO not defined');
   const [owner, repo] = env.GITHUB_REPO.split('/');
@@ -93,7 +94,7 @@ async function processUpdate(env: Env, update: any) {
 
     if (!chatId || !callbackId) return;
 
-    // ---------- Format selection: ask delivery method ----------
+    // ---------- Format selection: ask delivery method (S3 button only if enabled) ----------
     if (cbData.startsWith('format|')) {
       if (!(await hasAccess(env, chatId))) {
          await answerCallbackSafe(env, callbackId, '🔒 Only premium members can download.', true);
@@ -110,31 +111,56 @@ async function processUpdate(env: Env, update: any) {
       if (parts.length < 3) return;
       const [, encodedUrl, encodedFormat] = parts;
 
-      // Store chosen format in KV temporarily (auto‑expires in 2 minutes)
+      // Store chosen format in KV temporarily
       await env.BOT_STATE.put(`dl_choice:${chatId}`, JSON.stringify({
         url: decodeURIComponent(encodedUrl),
         format: decodeURIComponent(encodedFormat)
       }), { expirationTtl: 120 });
 
-      // Ask where to send
-      await callBaleApi(env, 'sendMessage', {
-        chat_id: chatId,
-        text: '📤 *Choose delivery method:*',
-        parse_mode: 'Markdown',
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '📥 Send to Bale', callback_data: 'dlmethod|bale' },
-              { text: '☁️ Send to S3', callback_data: 'dlmethod|s3' }
+      const s3Enabled = env.ENABLE_S3 === 'true';
+      if (s3Enabled) {
+        // Show both options
+        await callBaleApi(env, 'sendMessage', {
+          chat_id: chatId,
+          text: '📤 *Choose delivery method:*',
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '📥 Send to Bale', callback_data: 'dlmethod|bale' },
+                { text: '☁️ Send to S3', callback_data: 'dlmethod|s3' }
+              ]
             ]
-          ]
+          }
+        });
+        await answerCallbackSafe(env, callbackId, 'Select delivery method');
+      } else {
+        // S3 disabled – skip choice and go straight to Bale download
+        const choice = await env.BOT_STATE.get(`dl_choice:${chatId}`);
+        if (!choice) {
+          await answerCallbackSafe(env, callbackId, 'Session expired.', true);
+          return;
         }
-      });
-      await answerCallbackSafe(env, callbackId, 'Delivery method?');
+        const { url, format } = JSON.parse(choice);
+        await env.BOT_STATE.delete(`dl_choice:${chatId}`);
+        await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
+        await answerCallbackSafe(env, callbackId, 'Download started...');
+        await callBaleApi(env, 'sendMessage', {
+          chat_id: chatId,
+          text: '⏳ Download queued. You will receive the file shortly.'
+        });
+        await triggerWorkflow(env, {
+          action: 'download',
+          chat_id: chatId.toString(),
+          video_url: url,
+          format_id: format,
+          delivery: 'bale'
+        });
+      }
       return;
     }
 
-    // ---------- Handle delivery method choice ----------
+    // ---------- Delivery method chosen ----------
     if (cbData.startsWith('dlmethod|')) {
       const method = cbData.split('|')[1]; // 'bale' or 's3'
       const choiceKey = `dl_choice:${chatId}`;
@@ -146,7 +172,6 @@ async function processUpdate(env: Env, update: any) {
       const { url, format } = JSON.parse(choiceData);
       await env.BOT_STATE.delete(choiceKey);
 
-      // Check queue again
       const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
       if (isQueued === 'true') {
         await answerCallbackSafe(env, callbackId, '⚠️ You already have a download in progress.', true);
@@ -160,17 +185,17 @@ async function processUpdate(env: Env, update: any) {
         text: '⏳ Download queued. You will receive the file shortly.'
       });
 
-      // Trigger workflow with delivery method
       await triggerWorkflow(env, {
         action: 'download',
         chat_id: chatId.toString(),
         video_url: url,
         format_id: format,
-        delivery: method            // new input
+        delivery: method
       });
       return;
-    }    
-    // ---------- Handle "Download" button ----------
+    }
+
+    // ---------- Handle "Download" button (ytdl) ----------
     if (cbData.startsWith("ytdl|")) {
         const videoId = cbData.split("|")[1];
         await callBaleApi(env, "sendMessage", {
@@ -194,7 +219,7 @@ async function processUpdate(env: Env, update: any) {
         return;
     }
 
-    // ---------- Handle "Next page" button ----------
+    // ---------- Handle "Next page" button (youtube search) ----------
     if (cbData.startsWith("yt_next|")) {
         const nextToken = cbData.substring(8);
         const queryKey = `yt_query:${chatId}`;
@@ -224,14 +249,14 @@ async function processUpdate(env: Env, update: any) {
         await answerCallbackSafe(env, callbackId);
         return;
     }
-      // ---------- Hybrid paper download ----------
+
+    // ---------- Hybrid paper download ----------
     if (cbData.startsWith("paper|")) {
         const parts = cbData.split("|");
         if (parts.length < 3) return;
         const pdfUrl = decodeURIComponent(parts[1]);
         const title = decodeURIComponent(parts[2]);
 
-        // Attempt direct send
         let directSuccess = false;
         try {
           const resp = await fetch(
@@ -257,7 +282,6 @@ async function processUpdate(env: Env, update: any) {
           console.log("Direct send error:", e);
         }
 
-        // Fallback: GitHub Actions (check queue first)
         if (!directSuccess) {
           const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
           if (isQueued === "true") {
@@ -283,8 +307,8 @@ async function processUpdate(env: Env, update: any) {
         return;
     }
 
-      // ---------- Paper pagination (Next / Previous) ----------
-      if (cbData.startsWith("paper_next|") || cbData.startsWith("paper_prev|")) {
+    // ---------- Paper pagination ----------
+    if (cbData.startsWith("paper_next|") || cbData.startsWith("paper_prev|")) {
         const parts = cbData.split("|");
         if (parts.length < 3) return;
         const query = decodeURIComponent(parts[1]);
@@ -293,7 +317,6 @@ async function processUpdate(env: Env, update: any) {
         const response = await searchPapers(query, start);
         const { text: msgText, keyboard } = buildPaperMessage(response, query);
 
-        // Edit the original message
         await callBaleApi(env, "editMessageText", {
           chat_id: chatId,
           message_id: cb.message.message_id,
@@ -303,10 +326,10 @@ async function processUpdate(env: Env, update: any) {
         });
         await answerCallbackSafe(env, callbackId);
         return;
-      }
+    }
 
-              // ---------- Weather pagination ----------
-      if (cbData.startsWith("weather|")) {
+    // ---------- Weather pagination ----------
+    if (cbData.startsWith("weather|")) {
         const [, cityEnc, offsetStr] = cbData.split("|");
         const city = decodeURIComponent(cityEnc);
         const offset = parseInt(offsetStr, 10);
@@ -324,8 +347,8 @@ async function processUpdate(env: Env, update: any) {
         });
         await answerCallbackSafe(env, callbackId);
         return;
-      }
-        
+    }
+
     else if (cbData === 'check_premium') {
       const access = await hasAccess(env, chatId);
       const msg = access ? '✅ You have premium/admin access.' : '❌ No premium subscription found.';
@@ -469,18 +492,16 @@ async function processUpdate(env: Env, update: any) {
     return;
   }
 
-    // ---------- Webpage download ----------
+  // ---------- Webpage download ----------
   if (text.startsWith("/getpage ")) {
     const url = text.slice(9).trim();
     if (!url) return;
 
-    // Basic URL validation
     if (!/^https?:\/\/.+\..+/.test(url)) {
       await callBaleApi(env, "sendMessage", { chat_id: chatId, text: "❌ Invalid URL." });
       return;
     }
 
-    // Check queue (reuse dl_queue)
     const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
     if (isQueued === "true") {
       await callBaleApi(env, "sendMessage", {
@@ -502,19 +523,18 @@ async function processUpdate(env: Env, update: any) {
       {
         chat_id: chatId.toString(),
         page_url: url,
-        title: "Webpage",  // you could extract title later, but this is fine
+        title: "Webpage",
       },
       "getpage.yml"
     );
     return;
   }
 
-    // ---------- Mirror documentation site ----------
+  // ---------- Mirror documentation site ----------
   if (text.startsWith("/getdocs ")) {
     const url = text.slice(9).trim();
     if (!url) return;
 
-    // Basic URL validation
     if (!/^https?:\/\/.+\..+/.test(url)) {
       await callBaleApi(env, "sendMessage", { chat_id: chatId, text: "❌ Invalid URL." });
       return;
@@ -627,6 +647,7 @@ export default {
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
     if (url.pathname === '/github/done' && request.method === 'POST') {
       const body = await request.json() as any;
       if (body.secret === env.WORKER_SECRET && body.chat_id) {
@@ -635,6 +656,7 @@ export default {
       }
       return new Response('Unauthorized', { status: 401 });
     }
+
     return new Response('Not found', { status: 404 });
   }
 };
