@@ -78,7 +78,6 @@ jobs:
           YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}  
         run: |
           echo "$YOUTUBE_COOKIES_B64" | base64 -d > cookies.txt
-          echo "=== First 5 lines of cookies.txt ==="
           head -n 5 cookies.txt
           if ! grep -q "# Netscape HTTP Cookie File" cookies.txt; then
             echo "::error::cookies.txt is not in Netscape format!"
@@ -86,11 +85,13 @@ jobs:
           fi
           echo "Cookies file looks valid."
 
-      - name: Install AWS CLI
+      # ---- S3 steps (only when enabled AND delivery is s3) ----
+      - name: Install AWS CLI (S3)
+        if: env.ENABLE_S3 == 'true' && inputs.action == 'download' && inputs.delivery == 's3'
         run: pip install --quiet awscli
 
-      - name: Test S3 upload speed
-        if: inputs.action == 'download' && inputs.delivery == 's3'
+      - name: Quick S3 upload speed test (S3)
+        if: env.ENABLE_S3 == 'true' && inputs.action == 'download' && inputs.delivery == 's3'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCOUNT_1_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_1_SECRET_KEY }}
@@ -98,7 +99,6 @@ jobs:
           S3_ENDPOINT: ${{ secrets.S3_ACCOUNT_1_ENDPOINT }}
           S3_BUCKET: ${{ secrets.S3_ACCOUNT_1_BUCKET_NAME }}
         run: |
-          # Create a 5 MB random file
           dd if=/dev/urandom of=test-speed.bin bs=1M count=5 2>/dev/null
           echo "Uploading 5 MB test file…"
           time aws s3 cp test-speed.bin s3://${S3_BUCKET}/test-speed.bin \
@@ -106,7 +106,7 @@ jobs:
           rm test-speed.bin
           echo "Speed test done"
 
-          
+      # ---- Main bot task (unchanged) ----
       - name: Run bot task
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
