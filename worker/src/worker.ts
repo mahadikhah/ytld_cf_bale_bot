@@ -93,6 +93,7 @@ async function processUpdate(env: Env, update: any) {
 
     if (!chatId || !callbackId) return;
 
+    // ---------- Format selection: ask delivery method ----------
     if (cbData.startsWith('format|')) {
       if (!(await hasAccess(env, chatId))) {
          await answerCallbackSafe(env, callbackId, '🔒 Only premium members can download.', true);
@@ -107,30 +108,68 @@ async function processUpdate(env: Env, update: any) {
 
       const parts = cbData.split('|');
       if (parts.length < 3) return;
-      
-      try {
-        const [, encodedUrl, encodedFormat] = parts;
-        
-        await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
-        await answerCallbackSafe(env, callbackId, 'Download started...');
-        await callBaleApi(env, 'sendMessage', {
-          chat_id: chatId,
-          text: '⏳ Download queued. You will receive the file shortly.'
-        });
+      const [, encodedUrl, encodedFormat] = parts;
 
-        await triggerWorkflow(env, {
-          action: 'download',
-          chat_id: chatId.toString(),
-          video_url: decodeURIComponent(encodedUrl),
-          format_id: decodeURIComponent(encodedFormat)
-        });
-      } catch (e) {
-        await env.USER_PLANS.delete(`dl_queue:${chatId}`);
-        await answerCallbackSafe(env, callbackId, 'Error processing request.', true);
-      }
+      // Store chosen format in KV temporarily (auto‑expires in 2 minutes)
+      await env.BOT_STATE.put(`dl_choice:${chatId}`, JSON.stringify({
+        url: decodeURIComponent(encodedUrl),
+        format: decodeURIComponent(encodedFormat)
+      }), { expirationTtl: 120 });
+
+      // Ask where to send
+      await callBaleApi(env, 'sendMessage', {
+        chat_id: chatId,
+        text: '📤 *Choose delivery method:*',
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '📥 Send to Bale', callback_data: 'dlmethod|bale' },
+              { text: '☁️ Send to S3', callback_data: 'dlmethod|s3' }
+            ]
+          ]
+        }
+      });
+      await answerCallbackSafe(env, callbackId, 'Delivery method?');
       return;
-    } 
-    
+    }
+
+    // ---------- Handle delivery method choice ----------
+    if (cbData.startsWith('dlmethod|')) {
+      const method = cbData.split('|')[1]; // 'bale' or 's3'
+      const choiceKey = `dl_choice:${chatId}`;
+      const choiceData = await env.BOT_STATE.get(choiceKey);
+      if (!choiceData) {
+        await answerCallbackSafe(env, callbackId, 'Session expired. Please try again.', true);
+        return;
+      }
+      const { url, format } = JSON.parse(choiceData);
+      await env.BOT_STATE.delete(choiceKey);
+
+      // Check queue again
+      const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+      if (isQueued === 'true') {
+        await answerCallbackSafe(env, callbackId, '⚠️ You already have a download in progress.', true);
+        return;
+      }
+
+      await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
+      await answerCallbackSafe(env, callbackId, 'Download started...');
+      await callBaleApi(env, 'sendMessage', {
+        chat_id: chatId,
+        text: '⏳ Download queued. You will receive the file shortly.'
+      });
+
+      // Trigger workflow with delivery method
+      await triggerWorkflow(env, {
+        action: 'download',
+        chat_id: chatId.toString(),
+        video_url: url,
+        format_id: format,
+        delivery: method            // new input
+      });
+      return;
+    }    
     // ---------- Handle "Download" button ----------
     if (cbData.startsWith("ytdl|")) {
         const videoId = cbData.split("|")[1];
