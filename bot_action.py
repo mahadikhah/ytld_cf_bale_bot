@@ -16,7 +16,8 @@ ACTION = os.environ.get("ACTION", "formats")
 CHAT_ID = int(os.environ.get("CHAT_ID", "0"))
 VIDEO_URL = os.environ.get("VIDEO_URL", "")
 FORMAT_ID = os.environ.get("FORMAT_ID", "")
-DELIVERY_METHOD = os.environ.get("DELIVERY_METHOD", "bale")   # new: bale or s3
+DELIVERY_METHOD = os.environ.get("DELIVERY_METHOD", "bale")
+ENABLE_S3 = os.environ.get("ENABLE_S3", "false").lower() == "true"
 
 TEMP_DIR = "temp_videos"
 MAX_FILE_SIZE = 15 * 1024 * 1024   # 15 MB chunks (safe under Bale's 20 MB limit)
@@ -111,7 +112,6 @@ def get_video_formats(url):
     duration = data.get("duration", 0)
     formats = []
 
-    # Map heights to short resolution names
     resolution_map = {
         2160: "4K",
         1440: "QHD",
@@ -134,17 +134,13 @@ def get_video_formats(url):
         format_note = f.get("format_note", "")
         tbr = f.get("tbr")
         
-        # Resolution label
         res_label = resolution_map.get(height, f"{height}p")
-        
-        # Strip redundant height part from format_note
         stripped_note = ""
         if format_note:
             stripped_note = re.sub(
                 rf'^{re.escape(f"{height}p")}\s*', '', format_note, count=1
             ).strip()
         
-        # Estimate total download size
         if tbr and duration > 0:
             total_bytes = tbr * 1000 * duration / 8
             size_mb = total_bytes / (1024 * 1024)
@@ -160,7 +156,6 @@ def get_video_formats(url):
         else:
             size_label = "? MB"
         
-        # Build final label
         label = res_label
         if stripped_note:
             label += f" {stripped_note}"
@@ -180,7 +175,6 @@ def get_video_formats(url):
     for f in formats:
         size_mb = f["size"] // 1024 // 1024
         unique_key = f"{f['height']}_{size_mb}"
-        
         if unique_key not in seen_keys:
             seen_keys.add(unique_key)
             unique.append(f)
@@ -243,7 +237,7 @@ def split_and_send(file_path, base_name):
     def sort_parts(filepath):
         ext = os.path.splitext(filepath)[1].lower()
         if ext == '.zip':
-            return 999999  # Ensure main .zip is processed last
+            return 999999
         try:
             return int(ext.replace('.z', ''))
         except ValueError:
@@ -254,10 +248,8 @@ def split_and_send(file_path, base_name):
     for part_num, chunk in enumerate(split_files, 1):
         chunk_size = os.path.getsize(chunk)
         logger.info(f"Sending zip part {part_num}/{len(split_files)}: {os.path.basename(chunk)} ({chunk_size//1024//1024} MB)")
-        
         if not send_document(chunk):
             raise Exception(f"Failed to send zip part {part_num}")
-            
         os.remove(chunk)
         time.sleep(1)
 
@@ -267,7 +259,7 @@ def cleanup():
             f.unlink()
         os.rmdir(TEMP_DIR)
 
-# ---------- S3 upload / presign ----------
+# ---------- S3 helpers (only used when ENABLE_S3 is true) ----------
 def upload_to_s3(file_path, file_name):
     accounts = []
     for i in range(1, 6):
@@ -288,12 +280,9 @@ def upload_to_s3(file_path, file_name):
             "region": region,
             "bucket": bucket,
         })
-
     if not accounts:
         logger.error("No S3 accounts configured")
         return None
-
-    # Find an account with > 100 MB free space (30s timeout)
     best = None
     for acc in accounts:
         try:
@@ -316,15 +305,13 @@ def upload_to_s3(file_path, file_name):
             free = 5 * 1024 * 1024 * 1024 - used
             if free > 100 * 1024 * 1024:
                 best = acc
-                logger.info(f"Selected bucket '{acc['bucket']}' ({free//1024//1024} MB free)")
+                logger.info(f"Selected bucket '{acc['bucket']}' with {free//1024//1024} MB free")
                 break
         except Exception as e:
-            logger.warning(f"Skip bucket '{acc['bucket']}': {e}")
-
+            logger.warning(f"Error checking bucket '{acc['bucket']}': {e}")
     if not best:
         logger.error("No bucket with enough free space")
         return None
-
     acc = best
     s3_key = f"{file_name}_{int(time.time())}.mp4"
     env = {
@@ -333,8 +320,6 @@ def upload_to_s3(file_path, file_name):
         "AWS_SECRET_ACCESS_KEY": acc["secret_key"],
         "AWS_DEFAULT_REGION": acc["region"],
     }
-
-    # ---- Upload with 3‑minute timeout ----
     cmd_upload = [
         "aws", "s3", "cp", file_path, f"s3://{acc['bucket']}/{s3_key}",
         "--endpoint-url", acc["endpoint"], "--region", acc["region"]
@@ -348,8 +333,6 @@ def upload_to_s3(file_path, file_name):
     except subprocess.TimeoutExpired:
         logger.error("S3 upload timed out after 3 minutes")
         return None
-
-    # ---- Presigned URL (15s timeout) ----
     cmd_presign = [
         "aws", "s3", "presign", f"s3://{acc['bucket']}/{s3_key}",
         "--endpoint-url", acc["endpoint"], "--region", acc["region"],
@@ -364,8 +347,6 @@ def upload_to_s3(file_path, file_name):
         logger.error("Presign timed out")
         return None
     presigned = presign_res.stdout.strip()
-
-    # ---- Marker file (15s timeout) ----
     expire_epoch = int(time.time()) + 7200
     marker_key = f"{s3_key}.txt"
     with open("/tmp/marker.txt", "w") as f:
@@ -375,16 +356,13 @@ def upload_to_s3(file_path, file_name):
         "--endpoint-url", acc["endpoint"], "--region", acc["region"]
     ]
     subprocess.run(cmd_marker, capture_output=True, text=True, env=env, timeout=15)
-
     logger.info("S3 upload successful")
     return presigned
-
 
 def main():
     logger.info(f"Action: {ACTION} for chat {CHAT_ID}")
     out_file = None
     error_occurred = False
-
     try:
         if ACTION == "formats":
             title, duration, formats = get_video_formats(VIDEO_URL)
@@ -406,27 +384,28 @@ def main():
         elif ACTION == "download":
             if not FORMAT_ID:
                 raise ValueError("Missing format_id")
-            
             send_message("⏳ Fetching video details and starting download...")
             clean_title = get_clean_title(VIDEO_URL)
             base_name = f"{clean_title}_{FORMAT_ID}"
-            
             out_file = os.path.join(TEMP_DIR, f"{base_name}.mp4")
             os.makedirs(TEMP_DIR, exist_ok=True)
-            
             download_video(VIDEO_URL, FORMAT_ID, out_file)
             file_size = os.path.getsize(out_file)
 
             # Delivery method handling
-            if DELIVERY_METHOD == "s3":
+            delivery_method = DELIVERY_METHOD
+            if delivery_method == "s3" and not ENABLE_S3:
+                logger.info("S3 disabled – falling back to Bale")
+                delivery_method = "bale"
+
+            if delivery_method == "s3":
                 send_message("☁️ Uploading to cloud and generating download link...")
                 url = upload_to_s3(out_file, base_name)
                 if url:
-                    send_message(f"✅ *Your download link (valid 2 hours):*\n{url}")
+                    send_message(f"✅ *Your download link (valid 2 hours):*\n{url}")
                 else:
                     send_message("❌ Cloud upload failed. Please try again later.")
             else:
-                # Default 'bale' – try Bale, fallback to S3 on failure
                 try:
                     send_message(f"📤 Uploading **{clean_title}** ({file_size//1024//1024} MB) as a multi-part zip...")
                     split_and_send(out_file, base_name)
@@ -438,13 +417,16 @@ def main():
                         "3. Your system will automatically pull the pieces together to rebuild the full `.mp4` video."
                     )
                 except Exception as e:
-                    logger.exception("Bale upload failed, falling back to S3")
-                    send_message("⚠️ Bale upload failed. Trying cloud upload instead...")
-                    url = upload_to_s3(out_file, base_name)
-                    if url:
-                        send_message(f"✅ *Your download link (valid 2 hours):*\n{url}")
+                    logger.exception("Bale upload failed")
+                    if ENABLE_S3:
+                        send_message("⚠️ Bale upload failed. Trying cloud upload instead...")
+                        url = upload_to_s3(out_file, base_name)
+                        if url:
+                            send_message(f"✅ *Your download link (valid 2 hours):*\n{url}")
+                        else:
+                            send_message("❌ All upload methods failed. Sorry!")
                     else:
-                        send_message("❌ All upload methods failed. Sorry!")
+                        send_message("❌ Bale upload failed and S3 is not enabled. Sorry!")
             
     except Exception as e:
         error_occurred = True
@@ -454,12 +436,10 @@ def main():
             logger.info(f"Saving failed file as artifact: {out_file}")
             os.makedirs("artifacts", exist_ok=True)
             os.rename(out_file, f"artifacts/{os.path.basename(out_file)}")
-
     finally:
         if out_file and os.path.exists(out_file):
             os.remove(out_file)
         cleanup()
-
         worker_url = os.environ.get("WORKER_URL")
         worker_secret = os.environ.get("WORKER_SECRET")
         if worker_url and worker_secret and ACTION == "download":
@@ -472,7 +452,6 @@ def main():
                 logger.info("Successfully unlocked user queue on Cloudflare Worker.")
             except Exception as e:
                 logger.error(f"Failed to unlock user queue: {e}")
-
         if error_occurred:
             sys.exit(1)
 
