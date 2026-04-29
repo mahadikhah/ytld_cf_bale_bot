@@ -19,6 +19,10 @@ on:
       format_id:
         description: 'Format ID (for download)'
         required: false
+      delivery:
+        description: 'Delivery method (bale or s3)'
+        required: false
+        default: 'bale'
 
 jobs:
   run:
@@ -47,7 +51,6 @@ jobs:
 
       - name: Setup Python & dependencies
         run: |
-          # Install ffmpeg only if missing
           if ! command -v ffmpeg &> /dev/null; then
             echo "Installing ffmpeg..."
             sudo apt-get install -y ffmpeg
@@ -55,7 +58,6 @@ jobs:
             echo "ffmpeg already installed"
           fi
 
-          # Install Python packages with retry
           for i in {1..3}; do
             echo "Attempt $i: pip install yt-dlp requests"
             pip install --timeout 60 --retries 3 yt-dlp requests && break || sleep 5
@@ -84,6 +86,9 @@ jobs:
           fi
           echo "Cookies file looks valid."
 
+      - name: Install AWS CLI
+        run: pip install --quiet awscli
+
       - name: Run bot task
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
@@ -93,7 +98,32 @@ jobs:
           FORMAT_ID: ${{ inputs.format_id }}
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
-          
+          DELIVERY_METHOD: ${{ inputs.delivery }}
+          S3_ACCOUNT_1_ENDPOINT: ${{ secrets.S3_ACCOUNT_1_ENDPOINT }}
+          S3_ACCOUNT_1_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_1_ACCESS_KEY }}
+          S3_ACCOUNT_1_SECRET_KEY: ${{ secrets.S3_ACCOUNT_1_SECRET_KEY }}
+          S3_ACCOUNT_1_REGION: ${{ secrets.S3_ACCOUNT_1_REGION }}
+          S3_ACCOUNT_1_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_1_BUCKET_NAME }}
+          S3_ACCOUNT_2_ENDPOINT: ${{ secrets.S3_ACCOUNT_2_ENDPOINT }}
+          S3_ACCOUNT_2_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_2_ACCESS_KEY }}
+          S3_ACCOUNT_2_SECRET_KEY: ${{ secrets.S3_ACCOUNT_2_SECRET_KEY }}
+          S3_ACCOUNT_2_REGION: ${{ secrets.S3_ACCOUNT_2_REGION }}
+          S3_ACCOUNT_2_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_2_BUCKET_NAME }}
+          S3_ACCOUNT_3_ENDPOINT: ${{ secrets.S3_ACCOUNT_3_ENDPOINT }}
+          S3_ACCOUNT_3_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_3_ACCESS_KEY }}
+          S3_ACCOUNT_3_SECRET_KEY: ${{ secrets.S3_ACCOUNT_3_SECRET_KEY }}
+          S3_ACCOUNT_3_REGION: ${{ secrets.S3_ACCOUNT_3_REGION }}
+          S3_ACCOUNT_3_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_3_BUCKET_NAME }}
+          S3_ACCOUNT_4_ENDPOINT: ${{ secrets.S3_ACCOUNT_4_ENDPOINT }}
+          S3_ACCOUNT_4_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_4_ACCESS_KEY }}
+          S3_ACCOUNT_4_SECRET_KEY: ${{ secrets.S3_ACCOUNT_4_SECRET_KEY }}
+          S3_ACCOUNT_4_REGION: ${{ secrets.S3_ACCOUNT_4_REGION }}
+          S3_ACCOUNT_4_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_4_BUCKET_NAME }}
+          S3_ACCOUNT_5_ENDPOINT: ${{ secrets.S3_ACCOUNT_5_ENDPOINT }}
+          S3_ACCOUNT_5_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_5_ACCESS_KEY }}
+          S3_ACCOUNT_5_SECRET_KEY: ${{ secrets.S3_ACCOUNT_5_SECRET_KEY }}
+          S3_ACCOUNT_5_REGION: ${{ secrets.S3_ACCOUNT_5_REGION }}
+          S3_ACCOUNT_5_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_5_BUCKET_NAME }}
         run: python bot_action.py
 
       - name: Upload logs
