@@ -19,12 +19,19 @@ jobs:
         run: |
           echo "Downloading ${{ inputs.repo_full }}"
           curl -L -o repo.zip "https://api.github.com/repos/${{ inputs.repo_full }}/zipball"
-      - name: Send file
+
+      - name: Send file (Bale, then S3 if enabled)
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          ENABLE_S3: ${{ secrets.ENABLE_S3 }}
+          S3_ACCOUNT_1_ENDPOINT: ${{ secrets.S3_ACCOUNT_1_ENDPOINT }}
+          S3_ACCOUNT_1_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_1_ACCESS_KEY }}
+          S3_ACCOUNT_1_SECRET_KEY: ${{ secrets.S3_ACCOUNT_1_SECRET_KEY }}
+          S3_ACCOUNT_1_REGION: ${{ secrets.S3_ACCOUNT_1_REGION }}
+          S3_ACCOUNT_1_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_1_BUCKET_NAME }}
         run: |
           FILE_SIZE=$(stat -c%s repo.zip)
           MAX_SIZE=$((20 * 1024 * 1024))
@@ -46,21 +53,52 @@ jobs:
             done
             return 1
           }
+          upload_to_s3() {
+            local file="$1"; local key_name="$2"
+            if [ "${ENABLE_S3}" != "true" ]; then return 1; fi
+            aws s3 cp "$file" "s3://${S3_ACCOUNT_1_BUCKET_NAME}/${key_name}" \
+              --endpoint-url "${S3_ACCOUNT_1_ENDPOINT}" \
+              --region "${S3_ACCOUNT_1_REGION}" \
+              --only-show-errors
+            if [ $? -ne 0 ]; then return 1; fi
+            PRESIGNED=$(aws s3 presign "s3://${S3_ACCOUNT_1_BUCKET_NAME}/${key_name}" \
+              --endpoint-url "${S3_ACCOUNT_1_ENDPOINT}" \
+              --region "${S3_ACCOUNT_1_REGION}" \
+              --expires-in 7200)
+            echo "PRESIGNED_URL=$PRESIGNED" >> $GITHUB_ENV
+            return 0
+          }
+          success=false
           if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
             if try_upload "repo.zip" "${SAFE_NAME}.zip"; then
               send_message "✅ Repository downloaded: \`${SAFE_NAME}.zip\`"
-            else
-              send_message "❌ Bale unstable – unable to send file."
+              success=true
             fi
           else
             send_message "⚠️ Repository too large, splitting..."
             zip -s 15m "${SAFE_NAME}.zip" repo.zip
             PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
+            all_ok=true
             for part in $PARTS; do
-              if ! try_upload "$part"; then send_message "❌ Failed to send part."; exit 0; fi
+              if ! try_upload "$part"; then all_ok=false; break; fi
               sleep 1
             done
-            send_message "✅ Repository downloaded in parts. Extract \`${SAFE_NAME}.zip\`."
+            if [ "$all_ok" = true ]; then
+              send_message "✅ Repository downloaded in parts. Extract \`${SAFE_NAME}.zip\`."
+              success=true
+            fi
+          fi
+          if [ "$success" != true ]; then
+            if [ "${ENABLE_S3}" = "true" ]; then
+              upload_to_s3 "repo.zip" "${SAFE_NAME}_$(date +%s).zip"
+              if [ -n "$PRESIGNED_URL" ]; then
+                send_message "📦 Download via cloud: ${PRESIGNED_URL} (valid 2h)"
+              else
+                send_message "❌ All upload methods failed."
+              fi
+            else
+              send_message "❌ Bale upload failed, and S3 is not enabled."
+            fi
           fi
       - name: Unlock worker queue
         if: always()
