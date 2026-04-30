@@ -351,11 +351,14 @@ async function processUpdate(env: Env, update: any) {
         return;
     }
           // ---------- GitHub search pagination ----------
+      // ---------- GitHub callbacks ----------
+      // Search pagination
       if (cbData.startsWith('gh_search|')) {
         const [, queryEnc, pageStr] = cbData.split('|');
         const query = decodeURIComponent(queryEnc);
         const page = parseInt(pageStr);
-        const result = await searchRepos(query, page);
+        const token = env.GITHUB_TOKEN; // optional
+        const result = await searchRepos(query, page, token);
         const { text: msgText, keyboard } = buildSearchMessage(result, query, page);
         await callBaleApi(env, 'editMessageText', {
           chat_id: chatId,
@@ -368,12 +371,16 @@ async function processUpdate(env: Env, update: any) {
         return;
       }
 
-      // ---------- GitHub repo view ----------
+      // View repo details
       if (cbData.startsWith('gh_repo|')) {
-        const repoFull = decodeURIComponent(cbData.substring(8));
-        const [owner, repo] = repoFull.split('/');
-        const details = await getRepoDetails(owner, repo);
-        if (!details) { await answerCallbackSafe(env, callbackId, 'Repository not found.', true); return; }
+        const fullName = decodeURIComponent(cbData.substring(8));
+        const [owner, repo] = fullName.split('/');
+        const token = env.GITHUB_TOKEN;
+        const details = await getRepoDetails(owner, repo, token);
+        if (!details) {
+          await answerCallbackSafe(env, callbackId, 'Repository not found.', true);
+          return;
+        }
         const { text: msgText, keyboard } = buildRepoMessage(details);
         await callBaleApi(env, 'editMessageText', {
           chat_id: chatId,
@@ -386,15 +393,79 @@ async function processUpdate(env: Env, update: any) {
         return;
       }
 
-      // ---------- GitHub issues / PRs ----------
+      // File tree browsing
+      if (cbData.startsWith('gh_tree|')) {
+        const parts = cbData.split('|');
+        const fullName = decodeURIComponent(parts[1]);
+        const path = decodeURIComponent(parts[2] || '');
+        const [owner, repo] = fullName.split('/');
+        const token = env.GITHUB_TOKEN;
+        const items = await getRepoContents(owner, repo, path, token);
+        const { text: msgText, keyboard } = buildTreeMessage(fullName, path, items);
+        await callBaleApi(env, 'editMessageText', {
+          chat_id: chatId,
+          message_id: cb.message.message_id,
+          text: msgText,
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: keyboard },
+        });
+        await answerCallbackSafe(env, callbackId);
+        return;
+      }
+
+      // Download a single file
+      if (cbData.startsWith('gh_file|')) {
+        const parts = cbData.split('|');
+        const fullName = decodeURIComponent(parts[1]);
+        const path = decodeURIComponent(parts[2]);
+        const [owner, repo] = fullName.split('/');
+        const token = env.GITHUB_TOKEN;
+        const rawUrl = await getFileRawUrl(owner, repo, path, token);
+        if (!rawUrl) {
+          await answerCallbackSafe(env, callbackId, 'File not found.', true);
+          return;
+        }
+        // Send as document via Bale (raw URL)
+        try {
+          const resp = await fetch(`https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/sendDocument`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              document: rawUrl,
+              caption: path.split('/').pop() || 'file',
+            }),
+          });
+          const json = await resp.json();
+          if (resp.ok && json.ok) {
+            await answerCallbackSafe(env, callbackId, '✅ File sent.');
+          } else {
+            // Fallback: send URL
+            await callBaleApi(env, 'sendMessage', {
+              chat_id: chatId,
+              text: `📄 Download link:\n${rawUrl}`,
+            });
+            await answerCallbackSafe(env, callbackId, 'Download link sent.');
+          }
+        } catch (e) {
+          console.error('File send error:', e);
+          await answerCallbackSafe(env, callbackId, 'Failed to send file.');
+        }
+        return;
+      }
+
+      // Issues / PRs list pagination
       if (cbData.startsWith('gh_issues|') || cbData.startsWith('gh_pulls|')) {
         const parts = cbData.split('|');
         const type = parts[0] === 'gh_issues' ? 'issues' : 'pulls';
         const fullName = decodeURIComponent(parts[1]);
         const state = parts[2] || 'open';
-        const page = parts[3] ? parseInt(parts[3]) : 1;
+        const page = parseInt(parts[3] || '1');
         const [owner, repo] = fullName.split('/');
-        const items = type === 'issues' ? await getIssues(owner, repo, state, page) : await getPulls(owner, repo, state, page);
+        const token = env.GITHUB_TOKEN;
+        const items = type === 'issues'
+          ? await getIssues(owner, repo, state, page, token)
+          : await getPulls(owner, repo, state, page, token);
         const { text: msgText, keyboard } = buildIssueList(items, type, fullName, state, page);
         await callBaleApi(env, 'editMessageText', {
           chat_id: chatId,
@@ -407,53 +478,103 @@ async function processUpdate(env: Env, update: any) {
         return;
       }
 
-      // ---------- GitHub download ----------
+      // Issue / PR detail
+      if (cbData.startsWith('gh_item_detail|')) {
+        const parts = cbData.split('|');
+        const type = parts[1] as 'issues'|'pulls';
+        const fullName = decodeURIComponent(parts[2]);
+        const number = parseInt(parts[3]);
+        const [owner, repo] = fullName.split('/');
+        const token = env.GITHUB_TOKEN;
+        if (type === 'issues') {
+          // Issue detail with comments
+          const issues = await getIssues(owner, repo, 'all', 1, token); // inefficient, but we need the single issue; we'll fetch directly
+          const detailResp = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/issues/${number}`, { headers: headers(token) });
+          if (!detailResp.ok) { await answerCallbackSafe(env, callbackId, 'Issue not found.', true); return; }
+          const issueData: any = await detailResp.json();
+          const issue: GhIssue = {
+            number: issueData.number,
+            title: issueData.title,
+            state: issueData.state,
+            html_url: issueData.html_url,
+            user: issueData.user?.login || '',
+            labels: (issueData.labels || []).map((l: any) => l.name),
+            comments: issueData.comments,
+          };
+          const comments = await getIssueComments(owner, repo, number, 1, token);
+          const { text: msgText, keyboard } = buildIssueDetail(issue, comments, fullName);
+          await callBaleApi(env, 'editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: msgText,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: keyboard },
+          });
+        } else {
+          // PR detail
+          const prResp = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/pulls/${number}`, { headers: headers(token) });
+          if (!prResp.ok) { await answerCallbackSafe(env, callbackId, 'PR not found.', true); return; }
+          const prData: any = await prResp.json();
+          const pr: GhIssue = {
+            number: prData.number,
+            title: prData.title,
+            state: prData.state,
+            html_url: prData.html_url,
+            user: prData.user?.login || '',
+            labels: (prData.labels || []).map((l: any) => l.name),
+            comments: prData.comments || 0,
+          };
+          const commits = await getPrCommits(owner, repo, number, token);
+          const files = await getPrFiles(owner, repo, number, token);
+          const comments = await getPrComments(owner, repo, number, token);
+          const { text: msgText, keyboard } = buildPrDetail(pr, commits, files, comments, fullName);
+          await callBaleApi(env, 'editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: msgText,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: keyboard },
+          });
+        }
+        await answerCallbackSafe(env, callbackId);
+        return;
+      }
+
+      // Download repo ZIP
       if (cbData.startsWith('gh_dl|')) {
         const fullName = decodeURIComponent(cbData.substring(6));
         const [owner, repo] = fullName.split('/');
-        // Direct download via archive URL
         const archiveUrl = `https://api.github.com/repos/${owner}/${repo}/zipball`;
-        // Bale can accept document by URL if it's <20MB. We'll try direct send.
         try {
           const resp = await fetch(`https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/sendDocument`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: chatId,
-              document: archiveUrl,
-              caption: `${fullName}.zip`,
-            }),
+            body: JSON.stringify({ chat_id: chatId, document: archiveUrl, caption: `${repo}.zip` }),
           });
           const json = await resp.json();
           if (resp.ok && json.ok) {
-            await answerCallbackSafe(env, callbackId, '✅ Repository ZIP sent.');
-          } else {
-            // Fallback to GitHub Action if file too large or error
-            throw new Error(json.description || 'sendDocument failed');
-          }
-        } catch (e) {
-          console.log('GitHub download direct failed, trying workflow:', e);
-          const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
-          if (isQueued === 'true') {
-            await answerCallbackSafe(env, callbackId, '⚠️ You already have a download in progress.', true);
+            await answerCallbackSafe(env, callbackId, '✅ Sent ZIP.');
             return;
           }
-          await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
-          await answerCallbackSafe(env, callbackId, 'Downloading via action...');
-          await callBaleApi(env, 'sendMessage', {
-            chat_id: chatId,
-            text: `⏳ Fetching repository: \`${fullName}\`\nYou'll receive the ZIP shortly.`,
-            parse_mode: 'Markdown',
-          });
-          await triggerWorkflow(env, {
-            action: 'gh_download',
-            chat_id: chatId.toString(),
-            repo_full: fullName,
-          });
+        } catch (e) { /* fallback to workflow */ }
+        const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+        if (isQueued === 'true') {
+          await answerCallbackSafe(env, callbackId, '⚠️ Download already in progress.', true);
+          return;
         }
+        await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
+        await answerCallbackSafe(env, callbackId, 'Downloading via workflow...');
+        await callBaleApi(env, 'sendMessage', {
+          chat_id: chatId,
+          text: `⏳ Fetching repository: \`${fullName}\`\nYou'll receive the ZIP shortly.`,
+          parse_mode: 'Markdown',
+        });
+        await triggerWorkflow(env, {
+          chat_id: chatId.toString(),
+          repo_full: fullName,
+        }, 'gh_download.yml');
         return;
       }
-
     else if (cbData === 'check_premium') {
       const access = await hasAccess(env, chatId);
       const msg = access ? '✅ You have premium/admin access.' : '❌ No premium subscription found.';
