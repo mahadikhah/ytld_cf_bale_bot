@@ -69,7 +69,7 @@ export interface GhPRFile {
 }
 
 // ---------- helpers ----------
-function headers(token?: string): HeadersInit {
+export function headers(token?: string): HeadersInit {
   const h: Record<string, string> = { 'User-Agent': USER_AGENT };
   if (token) h['Authorization'] = `Bearer ${token}`;
   return h;
@@ -211,6 +211,37 @@ export async function getPrCommits(owner: string, repo: string, prNumber: number
     date: c.commit.author?.date?.split('T')[0] || '',
   }));
 }
+
+export async function getIssueDetail(owner: string, repo: string, issueNumber: number, token?: string) {
+  const resp = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/issues/${issueNumber}`, { headers: headers(token) });
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  return {
+    number: data.number,
+    title: data.title,
+    state: data.state,
+    html_url: data.html_url,
+    user: data.user?.login || '',
+    labels: (data.labels || []).map((l: any) => l.name),
+    comments: data.comments,
+  };
+}
+
+export async function getPrDetail(owner: string, repo: string, prNumber: number, token?: string) {
+  const resp = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/pulls/${prNumber}`, { headers: headers(token) });
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  return {
+    number: data.number,
+    title: data.title,
+    state: data.state,
+    html_url: data.html_url,
+    user: data.user?.login || '',
+    labels: (data.labels || []).map((l: any) => l.name),
+    comments: data.comments || 0,
+  };
+}
+
 
 export async function getPrFiles(owner: string, repo: string, prNumber: number, token?: string): Promise<GhPRFile[]> {
   const url = `${GITHUB_API}/repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=10`;
