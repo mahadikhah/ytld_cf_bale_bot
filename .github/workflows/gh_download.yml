@@ -1,0 +1,73 @@
+name: GitHub Repo Download
+
+on:
+  workflow_dispatch:
+    inputs:
+      chat_id:
+        description: 'Bale chat ID'
+        required: true
+      repo_full:
+        description: 'Full repo name (owner/repo)'
+        required: true
+
+jobs:
+  download-and-send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download ZIP
+        run: |
+          echo "Downloading ${{ inputs.repo_full }}"
+          curl -L -o repo.zip "https://api.github.com/repos/${{ inputs.repo_full }}/zipball"
+      - name: Send file
+        env:
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.chat_id }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+        run: |
+          FILE_SIZE=$(stat -c%s repo.zip)
+          MAX_SIZE=$((20 * 1024 * 1024))
+          SAFE_NAME=$(echo "${{ inputs.repo_full }}" | tr '/' '_')
+          send_message() {
+            curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$1\", \"parse_mode\": \"Markdown\"}"
+          }
+          try_upload() {
+            local file="$1"; local caption="$2"
+            for attempt in 1 2; do
+              RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" -F "caption=$caption" \
+                         "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+              HTTP_CODE=$(echo "$RESPONSE" | tail -c 4)
+              BODY=$(echo "$RESPONSE" | head -c -4)
+              if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then return 0; fi
+              [ $attempt -lt 2 ] && sleep 1
+            done
+            return 1
+          }
+          if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
+            if try_upload "repo.zip" "${SAFE_NAME}.zip"; then
+              send_message "✅ Repository downloaded: \`${SAFE_NAME}.zip\`"
+            else
+              send_message "❌ Bale unstable – unable to send file."
+            fi
+          else
+            send_message "⚠️ Repository too large, splitting..."
+            zip -s 15m "${SAFE_NAME}.zip" repo.zip
+            PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
+            for part in $PARTS; do
+              if ! try_upload "$part"; then send_message "❌ Failed to send part."; exit 0; fi
+              sleep 1
+            done
+            send_message "✅ Repository downloaded in parts. Extract \`${SAFE_NAME}.zip\`."
+          fi
+      - name: Unlock worker queue
+        if: always()
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          CHAT_ID: ${{ inputs.chat_id }}
+        run: |
+          curl -s -X POST "$WORKER_URL/github/done" -H "Content-Type: application/json" \
+               -d "{\"secret\": \"$WORKER_SECRET\", \"chat_id\": \"$CHAT_ID\"}"
