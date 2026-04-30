@@ -3,8 +3,13 @@ import { Hono } from 'hono';
 import { searchYouTube, searchWeb, buildYtMessage } from "./search";
 import { searchPapers, buildPaperMessage } from "./paper_search";
 import { getWeatherReport } from "./weather";
-import { searchRepos, getRepoDetails, getIssues, getPulls, buildSearchMessage, buildRepoMessage, buildIssueList } from "./github";
-
+import {
+  searchRepos, getRepoDetails, getIssues, getPulls,
+  buildSearchMessage, buildRepoMessage, buildIssueList,
+  buildTreeMessage, buildIssueDetail, buildPrDetail,
+  getRepoContents, getFileRawUrl,
+  getIssueDetail, getPrDetail, getIssueComments, getPrCommits, getPrFiles, getPrComments
+} from "./github";
 
 export interface Env {
   BOT_STATE: KVNamespace;
@@ -395,20 +400,26 @@ async function processUpdate(env: Env, update: any) {
 
       // File tree browsing
       if (cbData.startsWith('gh_tree|')) {
-        const parts = cbData.split('|');
-        const fullName = decodeURIComponent(parts[1]);
-        const path = decodeURIComponent(parts[2] || '');
-        const [owner, repo] = fullName.split('/');
-        const token = env.GITHUB_TOKEN;
-        const items = await getRepoContents(owner, repo, path, token);
-        const { text: msgText, keyboard } = buildTreeMessage(fullName, path, items);
-        await callBaleApi(env, 'editMessageText', {
-          chat_id: chatId,
-          message_id: cb.message.message_id,
-          text: msgText,
-          parse_mode: 'Markdown',
-          reply_markup: { inline_keyboard: keyboard },
-        });
+        try{
+          const parts = cbData.split('|');
+          const fullName = decodeURIComponent(parts[1]);
+          const path = decodeURIComponent(parts[2] || '');
+          const [owner, repo] = fullName.split('/');
+          const token = env.GITHUB_TOKEN;
+          const items = await getRepoContents(owner, repo, path, token);
+          const { text: msgText, keyboard } = buildTreeMessage(fullName, path, items);
+          await callBaleApi(env, 'editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: msgText,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: keyboard },
+          });
+        }catch(e){
+          console.error('gh_tree error:', e);
+          await answerCallbackSafe(env, callbackId, 'Failed to load files.', true);
+
+        }
         await answerCallbackSafe(env, callbackId);
         return;
       }
@@ -456,90 +467,87 @@ async function processUpdate(env: Env, update: any) {
 
       // Issues / PRs list pagination
       if (cbData.startsWith('gh_issues|') || cbData.startsWith('gh_pulls|')) {
-        const parts = cbData.split('|');
-        const type = parts[0] === 'gh_issues' ? 'issues' : 'pulls';
-        const fullName = decodeURIComponent(parts[1]);
-        const state = parts[2] || 'open';
-        const page = parseInt(parts[3] || '1');
-        const [owner, repo] = fullName.split('/');
-        const token = env.GITHUB_TOKEN;
-        const items = type === 'issues'
-          ? await getIssues(owner, repo, state, page, token)
-          : await getPulls(owner, repo, state, page, token);
-        const { text: msgText, keyboard } = buildIssueList(items, type, fullName, state, page);
-        await callBaleApi(env, 'editMessageText', {
-          chat_id: chatId,
-          message_id: cb.message.message_id,
-          text: msgText,
-          parse_mode: 'Markdown',
-          reply_markup: { inline_keyboard: keyboard },
-        });
-        await answerCallbackSafe(env, callbackId);
+        try{
+          const parts = cbData.split('|');
+          const type = parts[0] === 'gh_issues' ? 'issues' : 'pulls';
+          const fullName = decodeURIComponent(parts[1]);
+          const state = parts[2] || 'open';
+          const page = parseInt(parts[3] || '1');
+          const [owner, repo] = fullName.split('/');
+          const token = env.GITHUB_TOKEN;
+          const items = type === 'issues'
+            ? await getIssues(owner, repo, state, page, token)
+            : await getPulls(owner, repo, state, page, token);
+          const { text: msgText, keyboard } = buildIssueList(items, type, fullName, state, page);
+          await callBaleApi(env, 'editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: msgText,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: keyboard },
+          });
+          await answerCallbackSafe(env, callbackId); 
+        }catch(e){
+          console.error('gh_issues error:', e);
+          await answerCallbackSafe(env, callbackId, 'Failed to load issue`s details.', true);
+
+        }
         return;
       }
 
-      // Issue / PR detail
+      // ---------- Issue / PR detail (corrected) ----------
       if (cbData.startsWith('gh_item_detail|')) {
         const parts = cbData.split('|');
-        const type = parts[1] as 'issues'|'pulls';
+        const type = parts[1] as 'issues' | 'pulls';
         const fullName = decodeURIComponent(parts[2]);
         const number = parseInt(parts[3]);
         const [owner, repo] = fullName.split('/');
         const token = env.GITHUB_TOKEN;
-        if (type === 'issues') {
-          // Issue detail with comments
-          const issues = await getIssues(owner, repo, 'all', 1, token); // inefficient, but we need the single issue; we'll fetch directly
-          const detailResp = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/issues/${number}`, { headers: headers(token) });
-          if (!detailResp.ok) { await answerCallbackSafe(env, callbackId, 'Issue not found.', true); return; }
-          const issueData: any = await detailResp.json();
-          const issue: GhIssue = {
-            number: issueData.number,
-            title: issueData.title,
-            state: issueData.state,
-            html_url: issueData.html_url,
-            user: issueData.user?.login || '',
-            labels: (issueData.labels || []).map((l: any) => l.name),
-            comments: issueData.comments,
-          };
-          const comments = await getIssueComments(owner, repo, number, 1, token);
-          const { text: msgText, keyboard } = buildIssueDetail(issue, comments, fullName);
-          await callBaleApi(env, 'editMessageText', {
-            chat_id: chatId,
-            message_id: cb.message.message_id,
-            text: msgText,
-            parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: keyboard },
-          });
-        } else {
-          // PR detail
-          const prResp = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/pulls/${number}`, { headers: headers(token) });
-          if (!prResp.ok) { await answerCallbackSafe(env, callbackId, 'PR not found.', true); return; }
-          const prData: any = await prResp.json();
-          const pr: GhIssue = {
-            number: prData.number,
-            title: prData.title,
-            state: prData.state,
-            html_url: prData.html_url,
-            user: prData.user?.login || '',
-            labels: (prData.labels || []).map((l: any) => l.name),
-            comments: prData.comments || 0,
-          };
-          const commits = await getPrCommits(owner, repo, number, token);
-          const files = await getPrFiles(owner, repo, number, token);
-          const comments = await getPrComments(owner, repo, number, token);
-          const { text: msgText, keyboard } = buildPrDetail(pr, commits, files, comments, fullName);
-          await callBaleApi(env, 'editMessageText', {
-            chat_id: chatId,
-            message_id: cb.message.message_id,
-            text: msgText,
-            parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: keyboard },
-          });
+
+        try {
+          if (type === 'issues') {
+            const issue = await getIssueDetail(owner, repo, number, token);
+            if (!issue) {
+              await answerCallbackSafe(env, callbackId, 'Issue not found.', true);
+              return;
+            }
+            const comments = await getIssueComments(owner, repo, number, 1, token);
+            const { text: msgText, keyboard } = buildIssueDetail(issue, comments, fullName);
+            await callBaleApi(env, 'editMessageText', {
+              chat_id: chatId,
+              message_id: cb.message.message_id,
+              text: msgText,
+              parse_mode: 'Markdown',
+              reply_markup: { inline_keyboard: keyboard },
+            });
+          } else {
+            const pr = await getPrDetail(owner, repo, number, token);
+            if (!pr) {
+              await answerCallbackSafe(env, callbackId, 'PR not found.', true);
+              return;
+            }
+            const [commits, files, comments] = await Promise.all([
+              getPrCommits(owner, repo, number, token),
+              getPrFiles(owner, repo, number, token),
+              getPrComments(owner, repo, number, token),
+            ]);
+            const { text: msgText, keyboard } = buildPrDetail(pr, commits, files, comments, fullName);
+            await callBaleApi(env, 'editMessageText', {
+              chat_id: chatId,
+              message_id: cb.message.message_id,
+              text: msgText,
+              parse_mode: 'Markdown',
+              reply_markup: { inline_keyboard: keyboard },
+            });
+          }
+          await answerCallbackSafe(env, callbackId);
+        } catch (e) {
+          console.error('gh_item_detail error:', e);
+          await answerCallbackSafe(env, callbackId, 'Failed to load details. Please try again.', true);
         }
-        await answerCallbackSafe(env, callbackId);
         return;
       }
-
+    
       // Download repo ZIP
       if (cbData.startsWith('gh_dl|')) {
         const fullName = decodeURIComponent(cbData.substring(6));
