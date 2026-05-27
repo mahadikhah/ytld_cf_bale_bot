@@ -12,6 +12,7 @@ on:
           - download
           - music_search
           - music_download
+          - batch_music
       chat_id:
         description: 'Bale chat ID'
         required: true
