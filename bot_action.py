@@ -439,6 +439,7 @@ def main():
             cmd = [
                 "yt-dlp",
                 "--cookies", "cookies.txt",          # <-- add this line
+                "--remote-components", "ejs:github",   # <-- add this
                 "--no-check-certificates",
                 "--dump-json",
                 f"ytsearch5:{MUSIC_QUERY}"
@@ -496,6 +497,7 @@ def main():
             cmd = [
                 "yt-dlp",
                 "--cookies", "cookies.txt",          # <-- add this line
+                "--remote-components", "ejs:github",   # <-- add this
                 "--no-check-certificates",
                 "-f", "bestaudio",
                 "--extract-audio",
