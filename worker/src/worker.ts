@@ -167,41 +167,95 @@ async function processUpdate(env: Env, update: any) {
       return;
     }
 
-    // ---------- Delivery method chosen ----------
+    // ---------- Delivery method chosen (video or music) ----------
     if (cbData.startsWith('dlmethod|')) {
-      const method = cbData.split('|')[1]; // 'bale' or 's3'
+      const method = cbData.split('|')[1];
       const choiceKey = `dl_choice:${chatId}`;
       const choiceData = await env.BOT_STATE.get(choiceKey);
       if (!choiceData) {
-        await answerCallbackSafe(env, callbackId, 'Session expired. Please try again.', true);
+        await answerCallbackSafe(env, callbackId, 'Session expired.', true);
         return;
       }
-      const { url, format } = JSON.parse(choiceData);
+      const { url, format, type = 'video' } = JSON.parse(choiceData);
       await env.BOT_STATE.delete(choiceKey);
 
       const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
       if (isQueued === 'true') {
-        await answerCallbackSafe(env, callbackId, '⚠️ You already have a download in progress.', true);
+        await answerCallbackSafe(env, callbackId, '⚠️ Download in progress.', true);
         return;
       }
 
       await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
       await answerCallbackSafe(env, callbackId, 'Download started...');
-      await callBaleApi(env, 'sendMessage', {
-        chat_id: chatId,
-        text: '⏳ Download queued. You will receive the file shortly.'
-      });
+      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⏳ Download queued.' });
 
-      await triggerWorkflow(env, {
-        action: 'download',
-        chat_id: chatId.toString(),
-        video_url: url,
-        format_id: format,
-        delivery: method
-      });
+      if (type === 'music') {
+        await triggerWorkflow(env, {
+          action: 'music_download',
+          chat_id: chatId.toString(),
+          video_url: url,
+          delivery: method,
+        });
+      } else {
+        await triggerWorkflow(env, {
+          action: 'download',
+          chat_id: chatId.toString(),
+          video_url: url,
+          format_id: format,
+          delivery: method,
+        });
+      }
       return;
     }
+    // ---------- Music song selection ----------
+    if (cbData.startsWith("music|")) {
+      const encodedUrl = cbData.substring(6);
+      const songUrl = decodeURIComponent(encodedUrl);
+      // Store choice
+      await env.BOT_STATE.put(`dl_choice:${chatId}`, JSON.stringify({
+        url: songUrl,
+        type: 'music',
+      }), { expirationTtl: 120 });
 
+      const s3Enabled = env.ENABLE_S3 === 'true';
+      if (s3Enabled) {
+        await callBaleApi(env, 'sendMessage', {
+          chat_id: chatId,
+          text: '📤 *Choose delivery method:*',
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '📥 Send to Bale', callback_data: 'dlmethod|bale' },
+                { text: '☁️ Send to S3', callback_data: 'dlmethod|s3' }
+              ]
+            ]
+          }
+        });
+        await answerCallbackSafe(env, callbackId, 'Select delivery method');
+      } else {
+        // S3 disabled – start download immediately
+        const choice = await env.BOT_STATE.get(`dl_choice:${chatId}`);
+        if (!choice) { await answerCallbackSafe(env, callbackId, 'Session expired.', true); return; }
+        const { url } = JSON.parse(choice);
+        await env.BOT_STATE.delete(`dl_choice:${chatId}`);
+        const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+        if (isQueued === "true") {
+          await answerCallbackSafe(env, callbackId, '⚠️ Download in progress.', true);
+          return;
+        }
+        await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
+        await answerCallbackSafe(env, callbackId, 'Download started...');
+        await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⏳ Download queued.' });
+        await triggerWorkflow(env, {
+          action: 'music_download',
+          chat_id: chatId.toString(),
+          video_url: url,
+          delivery: 'bale'
+        });
+      }
+      return;
+    }
     // ---------- Handle "Download" button (ytdl) ----------
     if (cbData.startsWith("ytdl|")) {
         const videoId = cbData.split("|")[1];
@@ -601,6 +655,7 @@ async function processUpdate(env: Env, update: any) {
     const welcome =
       `🎬 *Welcome to your Search & Media Bot*\n\n` +
       `• 📥 *YouTube Downloader* – Send a YouTube link to get download qualities.\n` +
+      `• 🎵 *Music Download* – \`/music <song name>\` to search and download as MP3.\n` +
       `• 🔍 *YouTube Search* – \`/ysearch <query>\` or \`/ysearch_latest <query>\` for newest videos.\n` +
       `• 📄 *Paper Search* – \`/paper <query>\` searches arXiv and lets you download PDFs.\n` +
       `• 🌦️ *Weather* – \`/weather <city>\` for hourly + 7‑day forecast.\n`+
@@ -662,7 +717,51 @@ async function processUpdate(env: Env, update: any) {
     }
     return;
   }
-
+  // ---------- Music search ----------
+  if (text.startsWith("/music ")) {
+    const query = text.slice(7).trim();
+    if (!query) return;
+    const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+    if (isQueued === "true") {
+      await callBaleApi(env, "sendMessage", { chat_id: chatId, text: "⚠️ Download already in progress." });
+      return;
+    }
+    await callBaleApi(env, "sendMessage", { chat_id: chatId, text: `🔎 Searching music: \`${query}\`…` });
+    await triggerWorkflow(env, {
+      action: "music_search",
+      chat_id: chatId.toString(),
+      query: query,
+    });
+    return;
+  }
+  // ---------- Batch music download ----------
+  if (text.startsWith("/batchmusic ")) {
+    const raw = text.slice(12).trim();
+    if (!raw) return;
+    const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    if (lines.length === 0) {
+      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '❌ Please send a list of songs, one per line. Example:\n/batchmusic\nArtist - Title\nAnother Song' });
+      return;
+    }
+    if (lines.length > 10) {
+      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⚠️ Maximum 10 songs at a time to keep download fast.' });
+      return;
+    }
+    const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+    if (isQueued === 'true') {
+      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⚠️ Download already in progress.' });
+      return;
+    }
+    await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
+    await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: `📦 Queued ${lines.length} song(s) for download…` });
+    await triggerWorkflow(env, {
+      action: 'batch_music',
+      chat_id: chatId.toString(),
+      query: lines.join('\n'),
+      delivery: 'bale',   // will use Bale with S3 fallback
+    });
+    return;
+  }
   // ---------- YouTube Search ----------
   if (text.startsWith("/ysearch ") || text.startsWith("/ysearch_latest ")) {
     const args = text.split(" ");

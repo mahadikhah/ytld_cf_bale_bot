@@ -10,12 +10,15 @@ on:
         options:
           - formats
           - download
+          - music_search
+          - music_download
+          - batch_music
       chat_id:
         description: 'Bale chat ID'
         required: true
       video_url:
         description: 'YouTube URL'
-        required: true
+        required: false
       format_id:
         description: 'Format ID (for download)'
         required: false
@@ -23,6 +26,9 @@ on:
         description: 'Delivery method (bale or s3)'
         required: false
         default: 'bale'
+      query:
+        description: 'Search query (for music)'
+        required: false
 
 jobs:
   run:
@@ -116,6 +122,7 @@ jobs:
       - name: Run bot task
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          QUERY: ${{ inputs.query }}
           ACTION: ${{ inputs.action }}
           CHAT_ID: ${{ inputs.chat_id }}
           VIDEO_URL: ${{ inputs.video_url }}
