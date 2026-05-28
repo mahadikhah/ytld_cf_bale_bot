@@ -55,21 +55,66 @@ jobs:
           path: ~/.deno
           key: ${{ runner.os }}-deno-${{ hashFiles('.github/workflows/bot.yml') }}
 
-      - name: Install ffmpeg (static build)
+      # Cache the static ffmpeg binary so we only download it once per workflow change
+      - name: Cache ffmpeg binary
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ffmpeg-static
+          key: ${{ runner.os }}-ffmpeg-${{ hashFiles('.github/workflows/bot.yml') }}
+
+      - name: Install ffmpeg (static build with fallback)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
-          if ! command -v ffmpeg &> /dev/null; then
-            echo "Downloading static ffmpeg..."
-            curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o /tmp/ffmpeg.tar.xz
-            tar -xf /tmp/ffmpeg.tar.xz -C /tmp
-            # Move binaries into PATH
-            sudo mv /tmp/ffmpeg-*-amd64-static/ffmpeg /usr/local/bin/
-            sudo mv /tmp/ffmpeg-*-amd64-static/ffprobe /usr/local/bin/
-            rm -rf /tmp/ffmpeg*
-            echo "ffmpeg installed successfully"
+          set -x
+          PRIMARY_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+          FALLBACK_URL="https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-linux64-gpl.tar.xz"
+          
+          download_ffmpeg() {
+            local url="$1"
+            echo "Downloading ffmpeg from $url"
+            curl -sL --retry 2 --connect-timeout 10 --max-time 60 "$url" -o /tmp/ffmpeg.tar.xz
+          }
+          
+          if download_ffmpeg "$PRIMARY_URL"; then
+            echo "Primary download succeeded"
           else
-            echo "ffmpeg already installed"
+            echo "Primary failed, trying fallback..."
+            if download_ffmpeg "$FALLBACK_URL"; then
+              echo "Fallback succeeded"
+            else
+              echo "❌ Both ffmpeg download sources failed. The workflow will continue, but audio/video conversion may be unavailable."
+              # We'll create a dummy ffmpeg to avoid breaking later steps, but it won't work
+              # Better: we'll still allow the job to continue, and unlock the user later
+              exit 0  # don't fail the step, just continue
+            fi
           fi
           
+          # Extract and install
+          mkdir -p /tmp/ffmpeg-static
+          tar -xf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-static
+          BIN_DIR=$(find /tmp/ffmpeg-static -name ffmpeg -type f -print -quit | xargs dirname)
+          if [ -d "$BIN_DIR" ]; then
+            sudo cp "$BIN_DIR/ffmpeg" /usr/local/bin/
+            sudo cp "$BIN_DIR/ffprobe" /usr/local/bin/ 2>/dev/null || true
+            echo "ffmpeg installed successfully"
+          fi
+          rm -f /tmp/ffmpeg.tar.xz
+
+      - name: Restore ffmpeg from cache (if cached)
+        if: steps.cache-ffmpeg.outputs.cache-hit == 'true'
+        run: |
+          BIN_DIR=$(find /tmp/ffmpeg-static -name ffmpeg -type f -print -quit | xargs dirname)
+          if [ -d "$BIN_DIR" ]; then
+            sudo cp "$BIN_DIR/ffmpeg" /usr/local/bin/
+            sudo cp "$BIN_DIR/ffprobe" /usr/local/bin/ 2>/dev/null || true
+            echo "ffmpeg restored from cache"
+          else
+            echo "Cache mis-hit, ffmpeg not found in cache"
+          fi
+
+      - name: Install Python dependencies
+        run: |
           for i in {1..3}; do
             echo "Attempt $i: pip install yt-dlp requests"
             pip install --timeout 60 --retries 3 yt-dlp requests && break || sleep 5
@@ -118,7 +163,6 @@ jobs:
           rm test-speed.bin
           echo "Speed test done"
 
-      # ---- Main bot task (unchanged) ----
       - name: Run bot task
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
@@ -156,6 +200,18 @@ jobs:
           S3_ACCOUNT_5_REGION: ${{ secrets.S3_ACCOUNT_5_REGION }}
           S3_ACCOUNT_5_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_5_BUCKET_NAME }}
         run: python bot_action.py
+
+      - name: Unlock user queue (always)
+        if: always()
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          CHAT_ID: ${{ inputs.chat_id }}
+        run: |
+          curl -s -X POST "$WORKER_URL/github/done" \
+            -H "Content-Type: application/json" \
+            -d "{\"secret\": \"$WORKER_SECRET\", \"chat_id\": \"$CHAT_ID\"}"
+          echo "Queue unlock signal sent"
 
       - name: Upload logs
         if: always()
