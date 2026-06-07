@@ -1,0 +1,76 @@
+name: Telegram File Transfer
+
+on:
+  workflow_dispatch:
+    inputs:
+      bale_chat_id:
+        description: 'Target Bale chat ID'
+        required: true
+      file_url:
+        description: 'Telegram file URL'
+        required: true
+      file_name:
+        description: 'Original file name'
+        required: true
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download file
+        run: |
+          curl -L -o file.bin "${{ inputs.file_url }}"
+
+      - name: Send to Bale (with split if needed)
+        env:
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.bale_chat_id }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+        run: |
+          # Install Python & yt-dlp? Not needed. Just use existing split_and_send logic via Python.
+          # We'll run a small Python inline script that imports bot_action functions.
+          # But simpler: use bash and zip as usual.
+          send_message() {
+            curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$1\", \"parse_mode\": \"Markdown\"}"
+          }
+
+          FILE_SIZE=$(stat -c%s file.bin)
+          MAX_SIZE=$((15 * 1024 * 1024))
+          SAFE_NAME="${{ inputs.file_name }}"
+
+          if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
+            echo "File size $(($FILE_SIZE / 1024 / 1024)) MB – sending directly"
+            RESPONSE=$(curl -s -w "%{http_code}" -F "document=@file.bin;filename=$SAFE_NAME" \
+                       "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+            HTTP_CODE=$(echo "$RESPONSE" | tail -c 4)
+            BODY=$(echo "$RESPONSE" | head -c -4)
+            if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then
+              send_message "✅ File forwarded from Telegram."
+            else
+              send_message "❌ Failed to send file."
+            fi
+          else
+            send_message "⚠️ File too large – splitting..."
+            zip -s 15m archive.zip file.bin
+            PARTS=$(ls archive.z* archive.zip 2>/dev/null | sort -V)
+            for part in $PARTS; do
+              RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$part" \
+                         "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+              HTTP_CODE=$(echo "$RESPONSE" | tail -c 4)
+              BODY=$(echo "$RESPONSE" | head -c -4)
+              if [ "$HTTP_CODE" != "200" ] || ! echo "$BODY" | grep -q '"ok":true'; then
+                send_message "❌ Failed to send part. Aborting."
+                exit 1
+              fi
+              sleep 1
+            done
+            send_message "✅ Large file forwarded from Telegram (extract all parts and open the .zip)."
+          fi
+
+      - name: Unlock user (if queue lock exists, but not needed here)
+        # No lock needed as this is a separate action, but we can inform
+        run: echo "Transfer complete"
