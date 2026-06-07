@@ -39,14 +39,13 @@ jobs:
               env:
                   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
                   BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
-                  GITHUB_TOKEN: ${{ secrets.ACTION_GITHUB_TOKEN }}               # Personal Access Token for triggering workflows
-                  GITHUB_REPO: ${{ secrets.ACTION_GITHUB_REPO }}               # GITHUB REPO for triggering workflows
+                  GITHUB_TOKEN: ${{ secrets.ACTION_GITHUB_TOKEN }}
+                  GITHUB_REPO: ${{ secrets.ACTION_GITHUB_REPO }}
                   BALE_PAYMENT_TOKEN: ${{ secrets.BALE_PAYMENT_TOKEN }}
                   ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
                   WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
                   ENABLE_S3: ${{ secrets.ENABLE_S3 }}
               run: |
-                  # Set each secret via wrangler
                   echo "$BALE_BOT_TOKEN" | npx wrangler secret put BALE_BOT_TOKEN
                   echo "$GITHUB_TOKEN" | npx wrangler secret put GITHUB_TOKEN
                   echo "$GITHUB_REPO" | npx wrangler secret put GITHUB_REPO
@@ -55,19 +54,20 @@ jobs:
                   echo "$WORKER_SECRET" | npx wrangler secret put WORKER_SECRET
                   echo "${ENABLE_S3}" | npx wrangler secret put ENABLE_S3
 
-
             - name: Deploy to Cloudflare
+              id: deploy                        # ← give it an id
               uses: cloudflare/wrangler-action@v3
               with:
                   apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
                   accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
                   workingDirectory: "worker"
                   command: deploy
-                  
+
             - name: Set Telegram webhook
               env:
                   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-                  CLOUDFLARE_WORKER_URL: ${{ secrets.CLOUDFLARE_WORKER_URL }}  # e.g., https://your-worker.workers.dev
               run: |
-                  curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=${CLOUDFLARE_WORKER_URL}/telegram/webhook&drop_pending_updates=true"
+                  DEPLOYED_URL="${{ steps.deploy.outputs.deployment-url }}"
+                  echo "Deployed worker URL: $DEPLOYED_URL"
+                  curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=${DEPLOYED_URL}/telegram/webhook&drop_pending_updates=true"
                   echo "Telegram webhook updated"
