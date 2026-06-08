@@ -1,6 +1,9 @@
 // worker/src/telegram.ts
+import { Env } from './worker';
+import { triggerWorkflow } from './utils';
+
 export async function processTelegramUpdate(env: Env, update: any) {
-  const msg = update.message;
+  const msg = update.message || update.channel_post;
   if (!msg) return;
 
   const chatId = msg.chat.id;
@@ -14,7 +17,7 @@ export async function processTelegramUpdate(env: Env, update: any) {
       if (baleChatId) {
         await env.USER_PLANS.put(`tg_to_bale:${chatId}`, baleChatId);
         await env.USER_PLANS.delete(`link_code:${code}`);
-        await sendTelegramMessage(env, chatId, '✅ Your Telegram account has been linked to Bale! You can now forward files.');
+        await sendTelegramMessage(env, chatId, '✅ Your Telegram account has been linked to Bale! You can now forward messages.');
       } else {
         await sendTelegramMessage(env, chatId, '❌ Invalid or expired link code. Use /link in your Bale bot to get a new one.');
       }
@@ -29,13 +32,25 @@ export async function processTelegramUpdate(env: Env, update: any) {
     return;
   }
 
+  // Forward text messages
+  if (text && !text.startsWith('/')) {
+    const sender = msg.from?.first_name || msg.from?.username || 'Telegram';
+    const forwarded = `📩 *${sender}* (from Telegram):\n${escapeMarkdown(text)}`;
+    await callBaleApi(env, 'sendMessage', {
+      chat_id: baleChatId,
+      text: forwarded,
+      parse_mode: 'Markdown',
+    });
+    return;
+  }
+
   // Process files
-  const fileId = msg.document?.file_id || msg.video?.file_id || msg.audio?.file_id || msg.voice?.file_id;
+  const fileId = msg.document?.file_id || msg.video?.file_id || msg.audio?.file_id || msg.voice?.file_id || msg.photo?.slice(-1)[0]?.file_id;
   if (!fileId) return;
 
-  const fileType = msg.document ? 'document' : msg.video ? 'video' : msg.audio ? 'audio' : 'voice';
-  const fileName = msg.document?.file_name || `${fileType}_${msg.message_id}`;
-  const fileSize = msg.document?.file_size || msg.video?.file_size || msg.audio?.file_size || msg.voice?.file_size || 0;
+  const fileType = msg.document ? 'document' : msg.video ? 'video' : msg.audio ? 'audio' : msg.voice ? 'voice' : 'photo';
+  const fileName = msg.document?.file_name || msg.video?.file_name || msg.audio?.file_name || `${fileType}_${msg.message_id}.jpg`;
+  const fileSize = msg.document?.file_size || msg.video?.file_size || msg.audio?.file_size || msg.voice?.file_size || msg.photo?.slice(-1)[0]?.file_size || 0;
 
   // Get file path from Telegram
   const fileInfo = await getTelegramFile(env, fileId);
@@ -45,6 +60,7 @@ export async function processTelegramUpdate(env: Env, update: any) {
   }
 
   const fileUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
+  const caption = msg.caption ? `📩 *${msg.from?.first_name || 'Telegram'}*:\n${escapeMarkdown(msg.caption)}` : undefined;
 
   if (fileSize > 0 && fileSize <= 15 * 1024 * 1024) {
     // Download and send directly to Bale
@@ -54,20 +70,22 @@ export async function processTelegramUpdate(env: Env, update: any) {
       const arrayBuf = await fileResp.arrayBuffer();
       const form = new FormData();
       form.append('chat_id', baleChatId);
+      if (caption) form.append('caption', caption);
       form.append(fileType, new File([arrayBuf], fileName));
-      const baleResp = await fetch(`https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/send${capitalize(fileType)}`, {
+      
+      const method = fileType === 'photo' ? 'sendPhoto' : fileType === 'voice' ? 'sendVoice' : 'sendDocument';
+      const baleResp = await fetch(`https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/${method}`, {
         method: 'POST',
         body: form,
       });
       if (baleResp.ok) {
-        await sendTelegramMessage(env, chatId, '✅ File forwarded to Bale.');
+        await sendTelegramMessage(env, chatId, '✅ Forwarded to Bale.');
       } else {
         throw new Error(await baleResp.text());
       }
     } catch (e) {
       console.error('Direct send failed:', e);
-      await sendTelegramMessage(env, chatId, '❌ Failed to send file to Bale. Trying alternative method...');
-      // Fallback to workflow
+      await sendTelegramMessage(env, chatId, '❌ Failed to send file. Trying alternative method...');
       await triggerTelegramTransfer(env, baleChatId, fileUrl, fileName);
     }
   } else {
@@ -102,7 +120,18 @@ async function triggerTelegramTransfer(env: Env, baleChatId: string, fileUrl: st
   }, 'telegram_transfer.yml');
 }
 
-function capitalize(s: string) { return s.charAt(0).toUpperCase() + s.slice(1); }
+async function callBaleApi(env: Env, method: string, body: any) {
+  const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/${method}`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const data = await resp.json();
+  if (!resp.ok) console.error(`Bale API error (${method}):`, resp.status, data);
+  return data;
+}
 
-// Import triggerWorkflow from worker.ts (we'll adjust)
-import { triggerWorkflow } from './utils';
+function escapeMarkdown(text: string): string {
+  return text.replace(/[\\*_\[\]()~`>#+\-=|{}.!]/g, '\\$&');
+}
