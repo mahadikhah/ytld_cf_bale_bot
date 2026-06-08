@@ -7,10 +7,10 @@ on:
         description: 'Target Bale chat ID'
         required: true
       file_url:
-        description: 'Telegram file URL (optional, if file_id is not used)'
+        description: 'Telegram file URL (optional)'
         required: false
       file_id:
-        description: 'Telegram file ID (optional, if file_url is not used)'
+        description: 'Telegram file ID (optional)'
         required: false
       file_name:
         description: 'Original file name'
@@ -28,19 +28,32 @@ jobs:
           if [ -n "${{ inputs.file_id }}" ]; then
             echo "Fetching file URL from Telegram using file_id..."
             RESP=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${{ inputs.file_id }}")
-            FILE_PATH=$(echo "$RESP" | jq -r '.result.file_path')
-            if [ "$FILE_PATH" = "null" ] || [ -z "$FILE_PATH" ]; then
-              echo "Error: Could not get file path from Telegram"
-              exit 1
+            echo "Telegram response: $RESP"
+            FILE_PATH=$(echo "$RESP" | jq -r '.result.file_path // empty')
+            if [ -z "$FILE_PATH" ]; then
+              echo "getFile failed, trying fallback download..."
+              # Fallback: construct direct download URL (works for some files)
+              FALLBACK_URL="https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${{ inputs.file_id }}"
+              echo "Attempting direct download: $FALLBACK_URL"
+              curl -s -o file.bin "$FALLBACK_URL"
+              if [ $? -eq 0 ] && [ -f file.bin ] && [ -s file.bin ]; then
+                echo "Fallback download succeeded"
+                echo "SKIP_REAL_DOWNLOAD=true" >> $GITHUB_ENV
+              else
+                echo "Error: Could not download file"
+                exit 1
+              fi
+            else
+              FILE_URL="https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${FILE_PATH}"
+              echo "FILE_URL=$FILE_URL" >> $GITHUB_ENV
             fi
-            FILE_URL="https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${FILE_PATH}"
-            echo "FILE_URL=$FILE_URL" >> $GITHUB_ENV
           else
             echo "Using provided file_url: ${{ inputs.file_url }}"
             echo "FILE_URL=${{ inputs.file_url }}" >> $GITHUB_ENV
           fi
 
-      - name: Download file
+      - name: Download file (if not already downloaded via fallback)
+        if: env.SKIP_REAL_DOWNLOAD != 'true'
         run: |
           curl -L -o file.bin "$FILE_URL"
 
@@ -88,3 +101,13 @@ jobs:
             done
             send_message "✅ Large file forwarded (extract all parts and open the .zip)."
           fi
+
+      - name: Notify failure (if previous steps failed)
+        if: failure()
+        env:
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.bale_chat_id }}
+        run: |
+          curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
+               -H "Content-Type: application/json" \
+               -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"❌ Failed to process Telegram file transfer.\"}"
