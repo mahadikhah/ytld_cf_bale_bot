@@ -707,9 +707,14 @@ async function processUpdate(env: Env, update: any) {
   }
 
   // ---------- Link Telegram account ----------
-  if (text === '/link') {
-    const code = Math.random().toString(36).substring(2, 10); // random 8‑char
-    await env.USER_PLANS.put(`link_code:${code}`, chatId.toString(), { expirationTtl: 300 }); // 5 min expiry
+  if (text.startsWith('/link ')) {
+    const platform = text.slice(6).trim().toLowerCase();
+    if (platform !== 'telegram') {
+      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '❌ Currently only `telegram` linking is supported. Use `/link telegram`.' });
+      return;
+    }
+    const code = 'tg_' + Math.random().toString(36).substring(2, 10);
+    await env.USER_PLANS.put(`link_code:${code}`, chatId.toString(), { expirationTtl: 300 });
     await callBaleApi(env, 'sendMessage', {
       chat_id: chatId,
       text: `🔗 *Your Telegram link code:* \`${code}\`\n\nGo to your Telegram bot and send:\n/start ${code}\n\nThis code expires in 5 minutes.`,
