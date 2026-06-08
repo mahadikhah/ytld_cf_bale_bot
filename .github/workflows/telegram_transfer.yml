@@ -19,28 +19,25 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Download file
-        run: |
-          curl -L -o file.bin "${{ inputs.file_url }}"
+        run: curl -L -o file.bin "${{ inputs.file_url }}"
 
       - name: Send to Bale (with split if needed)
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.bale_chat_id }}
-          WORKER_URL: ${{ secrets.WORKER_URL }}
-          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
         run: |
-          # Install Python & yt-dlp? Not needed. Just use existing split_and_send logic via Python.
-          # We'll run a small Python inline script that imports bot_action functions.
-          # But simpler: use bash and zip as usual.
+          FILE_SIZE=$(stat -c%s file.bin)
+          MAX_SIZE=$((15 * 1024 * 1024))
+          # Use the original file name for the zip archive
+          SAFE_NAME=$(echo "${{ inputs.file_name }}" | tr -d '\\/*?:"<>|')
+          # Remove extension to get base name for split parts
+          BASE_NAME="${SAFE_NAME%.*}"
+
           send_message() {
             curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
                  -H "Content-Type: application/json" \
-                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$1\", \"parse_mode\": \"Markdown\"}"
+                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$1\"}"
           }
-
-          FILE_SIZE=$(stat -c%s file.bin)
-          MAX_SIZE=$((15 * 1024 * 1024))
-          SAFE_NAME="${{ inputs.file_name }}"
 
           if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
             echo "File size $(($FILE_SIZE / 1024 / 1024)) MB – sending directly"
@@ -54,9 +51,10 @@ jobs:
               send_message "❌ Failed to send file."
             fi
           else
-            send_message "⚠️ File too large – splitting..."
-            zip -s 15m archive.zip file.bin
-            PARTS=$(ls archive.z* archive.zip 2>/dev/null | sort -V)
+            send_message "⚠️ File too large – splitting into parts..."
+            # Create split zip with the original file name as base
+            zip -s 15m "${BASE_NAME}.zip" file.bin
+            PARTS=$(ls "${BASE_NAME}.z"* "${BASE_NAME}.zip" 2>/dev/null | sort -V)
             for part in $PARTS; do
               RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$part" \
                          "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
@@ -68,9 +66,5 @@ jobs:
               fi
               sleep 1
             done
-            send_message "✅ Large file forwarded from Telegram (extract all parts and open the .zip)."
+            send_message "✅ Large file forwarded (extract all parts and open the .zip)."
           fi
-
-      - name: Unlock user (if queue lock exists, but not needed here)
-        # No lock needed as this is a separate action, but we can inform
-        run: echo "Transfer complete"
