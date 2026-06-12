@@ -89,6 +89,18 @@ function extractYouTubeId(text: string): string | null {
   return null;
 }
 
+function extractInstagramUrl(text: string): string | null {
+  const patterns = [
+    /https?:\/\/(www\.)?instagram\.com\/(p|reel|tv|stories)\/[a-zA-Z0-9_\-]+/i,
+    /https?:\/\/instagram\.com\/[a-zA-Z0-9_\-]+\/(p|reel|tv|stories)\/[a-zA-Z0-9_\-]+/i
+  ];
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) return m[0];
+  }
+  return null;
+}
+
 async function hasAccess(env: Env, chatId: string | number): Promise<boolean> {
   if (env.ADMIN_CHAT_ID && chatId.toString() === env.ADMIN_CHAT_ID) return true;
   const isPremium = await env.USER_PLANS.get(`premium:${chatId}`);
@@ -210,6 +222,32 @@ async function processUpdate(env: Env, update: any) {
         });
       }
       return;
+    }
+
+     // ---------- Instagram delivery method ----------
+    if (cbData.startsWith('ig_dlmethod|')) {
+        const method = cbData.split('|')[1];
+        const igUrl = await env.BOT_STATE.get(`ig_choice:${chatId}`);
+        if (!igUrl) {
+            await answerCallbackSafe(env, callbackId, 'Session expired.', true);
+            return;
+        }
+        await env.BOT_STATE.delete(`ig_choice:${chatId}`);
+        const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+        if (isQueued === 'true') {
+            await answerCallbackSafe(env, callbackId, '⚠️ Download in progress.', true);
+            return;
+        }
+        await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
+        await answerCallbackSafe(env, callbackId, 'Download started...');
+        await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⏳ Download queued.' });
+        await triggerWorkflow(env, {
+            action: 'instagram',
+            chat_id: chatId.toString(),
+            video_url: igUrl,
+            delivery: method
+        });
+        return;
     }
     // ---------- Music song selection ----------
     if (cbData.startsWith("music|")) {
@@ -659,6 +697,7 @@ async function processUpdate(env: Env, update: any) {
     const welcome =
       `🎬 *Welcome to your Search & Media Bot*\n\n` +
       `• 📥 *YouTube Downloader* – Send a YouTube link to get download qualities.\n` +
+      `• 📸 *Instagram Downloader* – \`/ig <instagram link>\` Send an Instagram link to get all media.\n` +
       `• 🎵 *Music Download* – \`/music <song name>\` to search and download as MP3.\n` +
       `• 🔍 *YouTube Search* – \`/ysearch <query>\` or \`/ysearch_latest <query>\` for newest videos.\n` +
       `• 📄 *Paper Search* – \`/paper <query>\` searches arXiv and lets you download PDFs.\n` +
@@ -666,6 +705,7 @@ async function processUpdate(env: Env, update: any) {
       `• 📦 *Webpage Saver* – \`/getpage <url>\` downloads the full page as a ZIP.\n`+
       `• 🌐 *Web Search* – \`/search <query>\` for web search.\n` +
       `• 🐙 *GitHub* – \`/gh search <query>\`, \`/gh repo owner/repo\`\n` +
+      `• 📸 *Telegram Bridge* – \`/link telegram\` then copy the token and run  \`/start token\` in telegram and forward message and files to the telegram bot you will recive them back in here chunked if its too big .\n` +
       `• 💎 *Premium* – Priority queue. Use /buy to upgrade.`;
     await callBaleApi(env, 'sendMessage', {
       chat_id: chatId,
@@ -738,6 +778,27 @@ async function processUpdate(env: Env, update: any) {
     }
     return;
   }
+  
+  // ---------- Instagram download (explicit command) ----------
+  if (text.startsWith('/ig ')) {
+    const url = text.slice(4).trim();
+    if (!url) return;
+    const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+    if (isQueued === 'true') {
+      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⚠️ Download already in progress.' });
+      return;
+    }
+    await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
+    await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⏳ Download queued.' });
+    await triggerWorkflow(env, {
+      action: 'instagram',
+      chat_id: chatId.toString(),
+      video_url: url,
+      delivery: 'bale'
+    });
+    return;
+  }
+
   // ---------- Music search ----------
   if (text.startsWith("/music ")) {
     const query = text.slice(7).trim();
@@ -967,6 +1028,48 @@ async function processUpdate(env: Env, update: any) {
     return;
   }
 }
+
+  const igUrl = extractInstagramUrl(text);
+  if (igUrl) {
+    if (!(await hasAccess(env, chatId))) {
+        await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '🔒 Only premium members can download from Instagram.' });
+        return;
+    }
+    const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+    if (isQueued === 'true') {
+        await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⚠️ Download already in progress.' });
+        return;
+    }
+    // Store the URL and ask delivery method
+    await env.BOT_STATE.put(`ig_choice:${chatId}`, igUrl, { expirationTtl: 120 });
+    const s3Enabled = env.ENABLE_S3 === 'true';
+    if (s3Enabled) {
+        await callBaleApi(env, 'sendMessage', {
+            chat_id: chatId,
+            text: '📤 *Choose delivery method:*',
+            parse_mode: 'Markdown',
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: '📥 Send to Bale', callback_data: `ig_dlmethod|bale` },
+                     { text: '☁️ Send to S3', callback_data: `ig_dlmethod|s3` }]
+                ]
+            }
+        });
+    } else {
+        const igUrl = await env.BOT_STATE.get(`ig_choice:${chatId}`);
+        if (!igUrl) return;
+        await env.BOT_STATE.delete(`ig_choice:${chatId}`);
+        await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
+        await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⏳ Download queued.' });
+        await triggerWorkflow(env, {
+            action: 'instagram',
+            chat_id: chatId.toString(),
+            video_url: igUrl,
+            delivery: 'bale'
+        });
+    }
+    return;
+  }
 
 // ------------------ PAYMENT HANDLER ------------------
 async function handlePaymentUpdate(env: Env, update: any) {
