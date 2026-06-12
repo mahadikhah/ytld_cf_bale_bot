@@ -1,4 +1,4 @@
-name: Large Telegram Transfer (user account)
+name: Large Telegram Transfer (via user account)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
         description: 'Target Bale chat ID'
         required: true
       channel_id:
-        description: 'Channel ID where file was forwarded'
+        description: 'Channel ID where the file was forwarded'
         required: true
       message_id:
         description: 'Message ID in the channel'
@@ -15,15 +15,18 @@ on:
       file_name:
         description: 'Original file name'
         required: true
+      tg_chat_id:
+        description: 'Telegram chat ID (to send progress)'
+        required: true
 
 concurrency:
-    group: large-telegram-transfer
-    cancel-in-progress: false
+  group: large-telegram-transfer
+  cancel-in-progress: false
 
 jobs:
   transfer:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -33,11 +36,13 @@ jobs:
       - name: Download via userbot and send to Bale
         env:
           TG_USER_SESSION: ${{ secrets.TG_USER_SESSION }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.bale_chat_id }}
           CHANNEL_ID: ${{ inputs.channel_id }}
           MESSAGE_ID: ${{ inputs.message_id }}
           FILE_NAME: ${{ inputs.file_name }}
+          TG_CHAT_ID: ${{ inputs.tg_chat_id }}
         run: python tg_download.py
 
       - name: Unlock worker queue
