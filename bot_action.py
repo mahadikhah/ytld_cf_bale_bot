@@ -688,6 +688,74 @@ def main():
                 send_message(result_msg)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+        # ---------- Instagram download ----------
+        elif ACTION == "instagram":
+            if not VIDEO_URL:
+                raise ValueError("Missing Instagram URL")
+            send_message("⏳ Fetching Instagram media…")
+            temp_ig = "temp_instagram"
+            os.makedirs(temp_ig, exist_ok=True)
+            # Build command – use Instagram cookies if available
+            cmd = ["yt-dlp", "--no-check-certificates"]
+            if os.path.exists("ig_cookies.txt"):
+                cmd.append("--cookies")
+                cmd.append("ig_cookies.txt")
+            cmd.extend(["-o", f"{temp_ig}/%(title).45s.%(ext)s", VIDEO_URL])
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error(f"Instagram download failed: {result.stderr}")
+                send_message("❌ Failed to download Instagram media. It may be private or require login.")
+                shutil.rmtree(temp_ig, ignore_errors=True)
+                return
+            files = os.listdir(temp_ig)
+            if not files:
+                send_message("❌ No media found.")
+                shutil.rmtree(temp_ig, ignore_errors=True)
+                return
+            # Single file or zip
+            if len(files) == 1:
+                out_file = os.path.join(temp_ig, files[0])
+                base_name = os.path.splitext(files[0])[0]
+            else:
+                zip_name = f"instagram_{int(time.time())}.zip"
+                zip_path = os.path.join(temp_ig, zip_name)
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for f in files:
+                        zipf.write(os.path.join(temp_ig, f), arcname=f)
+                out_file = zip_path
+                base_name = "instagram_media"
+            file_size = os.path.getsize(out_file)
+
+            delivery_method = DELIVERY_METHOD
+            if delivery_method == "s3" and not ENABLE_S3:
+                logger.info("S3 disabled – falling back to Bale")
+                delivery_method = "bale"
+
+            if delivery_method == "s3":
+                send_message("☁️ Uploading to cloud…")
+                url = upload_to_s3(out_file, base_name)
+                if url:
+                    send_message(f"✅ *Download link (valid 2 h):*\n{url}")
+                else:
+                    send_message("❌ Cloud upload failed.")
+            else:
+                try:
+                    send_message(f"📤 Uploading Instagram media ({file_size//1024//1024} MB)…")
+                    split_and_send(out_file, base_name)
+                    send_message("✅ Instagram media sent!")
+                except Exception as e:
+                    logger.exception("Bale upload failed")
+                    if ENABLE_S3:
+                        send_message("⚠️ Bale upload failed. Trying cloud…")
+                        url = upload_to_s3(out_file, base_name)
+                        if url:
+                            send_message(f"✅ *Download link:*\n{url}")
+                        else:
+                            send_message("❌ All upload methods failed.")
+                    else:
+                        send_message("❌ Bale upload failed and S3 is not enabled.")
+            shutil.rmtree(temp_ig, ignore_errors=True)
+
     except Exception as e:
         error_occurred = True
         logger.exception("Action failed")
@@ -702,9 +770,11 @@ def main():
         cleanup()
         if os.path.exists("temp_music_batch"):
             shutil.rmtree("temp_music_batch", ignore_errors=True)
+        if os.path.exists("temp_instagram"):
+            shutil.rmtree("temp_instagram", ignore_errors=True)
         worker_url = os.environ.get("WORKER_URL")
         worker_secret = os.environ.get("WORKER_SECRET")
-        if worker_url and worker_secret and ACTION in ("download", "music_download", "batch_music"):
+        if worker_url and worker_secret and ACTION in ("download", "music_download", "batch_music", "instagram"):
             try:
                 requests.post(
                     f"{worker_url}/github/done",
