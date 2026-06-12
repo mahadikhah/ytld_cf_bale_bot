@@ -1027,9 +1027,8 @@ async function processUpdate(env: Env, update: any) {
     });
     return;
   }
-}
 
-  const igUrl = extractInstagramUrl(text);
+    const igUrl = extractInstagramUrl(text);
   if (igUrl) {
     if (!(await hasAccess(env, chatId))) {
         await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '🔒 Only premium members can download from Instagram.' });
@@ -1070,6 +1069,7 @@ async function processUpdate(env: Env, update: any) {
     }
     return;
   }
+}
 
 // ------------------ PAYMENT HANDLER ------------------
 async function handlePaymentUpdate(env: Env, update: any) {
