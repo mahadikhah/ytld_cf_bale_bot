@@ -17,8 +17,8 @@ message_id = int(os.environ["MESSAGE_ID"])
 original_name = os.environ["FILE_NAME"]
 
 MAX_SIZE = 15 * 1024 * 1024
-PARALLEL_CHUNKS = 4            # number of parallel downloads
-CHUNK_SIZE = 5 * 1024 * 1024   # 5 MB per chunk → less data to reassemble on failure
+PARALLEL_CHUNKS = 8            # number of parallel downloads
+CHUNK_SIZE = 10 * 1024 * 1024   # 5 MB per chunk → less data to reassemble on failure
 
 # ---------- Messaging ----------
 def bale_api(method, payload):
