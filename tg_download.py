@@ -1,4 +1,4 @@
-import os, subprocess, time, re, tempfile, asyncio
+import os, subprocess, time, re, tempfile, asyncio, io
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 import requests
@@ -17,7 +17,7 @@ original_name = os.environ["FILE_NAME"]
 
 MAX_SIZE = 15 * 1024 * 1024
 
-# ---------- Messaging helpers ----------
+# ---------- Helpers ----------
 def bale_api(method, payload):
     return requests.post(f"https://tapi.bale.ai/bot{bale_token}/{method}", json=payload).json()
 
@@ -63,7 +63,7 @@ def unlock_queue():
         except Exception as e:
             print(f"[Unlock] Failed: {e}")
 
-# ---------- Main logic ----------
+# ---------- Main ----------
 async def main():
     safe_name = re.sub(r'[\\/*?:"<>|]', "_", original_name)
     if len(safe_name) > 100:
@@ -79,7 +79,6 @@ async def main():
     await client.start()
 
     try:
-        # Locate file
         send_bale("🔍 Locating your file in the channel…")
         send_telegram("🔍 Locating your file in the channel…")
 
@@ -91,41 +90,64 @@ async def main():
 
         file_size_mb = message.document.size / (1024 * 1024)
 
-        # Send initial progress messages
+        # Initial progress messages
         bale_res = send_bale(f"📥 *{original_name}*\n0% · 0 / {file_size_mb:.1f} MB")
         bale_progress_id = bale_res["result"]["message_id"]
-
         tg_res = send_telegram(f"📥 *{original_name}*\n0% · 0 / {file_size_mb:.1f} MB")
         tg_progress_id = tg_res["result"]["message_id"]
 
-        last_update = 0
-        def progress_callback(received, total):
-            nonlocal last_update
-            now = time.time()
-            if total > 0 and now - last_update >= 8:
-                pct = received / total * 100
-                text = f"📥 *{original_name}*\n{pct:.0f}% · {received//(1024*1024)} / {total//(1024*1024)} MB"
-                edit_bale(bale_progress_id, text)
-                edit_telegram(tg_progress_id, text)
-                last_update = now
+        # Try to get a direct HTTP download URL
+        download_url = None
+        try:
+            download_url = await client.get_download_url(message, dc_id=message.document.dc_id)
+            print(f"[Download] Using direct HTTP URL (faster)")
+        except Exception as e:
+            print(f"[Download] Direct URL failed: {e}, falling back to Telethon download")
 
         start = time.time()
-        # Use a larger chunk size for faster download
-        await message.download_media(
-            file=download_path,
-            progress_callback=progress_callback,
-            part_size_kb=512      # 512 KB per chunk (default is 128 KB)
-        )
+        last_update = 0
+
+        if download_url:
+            # Direct HTTP download with streaming and progress
+            headers = {"User-Agent": "Mozilla/5.0"}
+            with requests.get(download_url, stream=True, headers=headers, timeout=300) as r:
+                r.raise_for_status()
+                total_length = int(r.headers.get('content-length', 0))
+                downloaded = 0
+                with open(download_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=1024*1024):  # 1 MB chunks
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        now = time.time()
+                        if total_length > 0 and now - last_update >= 8:
+                            pct = downloaded / total_length * 100
+                            text = f"📥 *{original_name}*\n{pct:.0f}% · {downloaded//(1024*1024)} / {total_length//(1024*1024)} MB"
+                            edit_bale(bale_progress_id, text)
+                            edit_telegram(tg_progress_id, text)
+                            last_update = now
+        else:
+            # Fallback to Telethon download
+            def progress_callback(received, total):
+                nonlocal last_update
+                now = time.time()
+                if total > 0 and now - last_update >= 8:
+                    pct = received / total * 100
+                    text = f"📥 *{original_name}*\n{pct:.0f}% · {received//(1024*1024)} / {total//(1024*1024)} MB"
+                    edit_bale(bale_progress_id, text)
+                    edit_telegram(tg_progress_id, text)
+                    last_update = now
+
+            await message.download_media(file=download_path, progress_callback=progress_callback)
+
         elapsed = time.time() - start
         local_size = os.path.getsize(download_path)
         speed_mbps = (local_size / (1024*1024)) / elapsed if elapsed > 0 else 0
 
-        # Final update
         final_dl = f"✅ Downloaded {local_size//(1024*1024)} MB in {elapsed:.0f}s ({speed_mbps:.1f} MB/s). Processing…"
         edit_bale(bale_progress_id, final_dl)
         edit_telegram(tg_progress_id, final_dl)
 
-        # --- Split & upload ---
+        # --- Split & upload (unchanged) ---
         if local_size <= MAX_SIZE:
             send_bale("📤 Uploading directly to Bale…")
             send_telegram("📤 Uploading directly to Bale…")
