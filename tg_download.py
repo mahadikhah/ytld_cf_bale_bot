@@ -64,28 +64,22 @@ def unlock_queue():
         except Exception as e:
             print(f"[Unlock] Failed: {e}")
 
-# ---------- Optimised download function ----------
+# ---------- High‑speed MTProto download (2 MB chunks) ----------
 async def download_large_file(client, msg, file_path, progress_callback):
-    """Downloads a file using MTProto with 1 MB chunks for maximum speed."""
+    """Download a document with 2 MB part size for maximum throughput."""
     doc = msg.document
-    # Create an input file location for the document
     location = InputDocumentFileLocation(
         id=doc.id,
         access_hash=doc.access_hash,
         file_reference=doc.file_reference,
-        thumb_size=''   # empty for the main file, not thumbnail
+        thumb_size=''
     )
-    # Total file size
     total = doc.size
-    downloaded = 0
-    # Use 1 MB part size
-    part_size = 1024 * 1024
+    part_size = 2 * 1024 * 1024   # 2 MB chunks
     with open(file_path, 'wb') as f:
         async for chunk in client.iter_download(location, offset=0, request_size=part_size):
             f.write(chunk)
-            downloaded += len(chunk)
-            if progress_callback:
-                progress_callback(downloaded, total)
+            progress_callback(len(chunk), total)
 
 # ---------- Main ----------
 async def main():
@@ -120,25 +114,26 @@ async def main():
         tg_res = send_telegram(f"📥 *{original_name}*\n0% · 0 / {file_size_mb:.1f} MB")
         tg_progress_id = tg_res["result"]["message_id"]
 
-        # Inform the user: we're using MTProto (optimized)
-        send_bale("⚡ Method: MTProto (optimized)")
-        send_telegram("⚡ Method: MTProto (optimized)")
+        send_bale("⚡ Method: MTProto (2 MB chunks)")
+        send_telegram("⚡ Method: MTProto (2 MB chunks)")
 
         start = time.time()
         last_update = 0
 
-        # Progress callback for the download
-        def progress_callback(received, total):
+        # Progress callback – updates both Bale and Telegram
+        def progress_callback(chunk_size, total):
             nonlocal last_update
+            # We accumulate downloaded bytes via a closure variable
+            progress_callback.downloaded += chunk_size
             now = time.time()
             if total > 0 and now - last_update >= 8:
-                pct = received / total * 100
-                text = f"📥 *{original_name}*\n{pct:.0f}% · {received//(1024*1024)} / {total//(1024*1024)} MB"
+                pct = progress_callback.downloaded / total * 100
+                text = f"📥 *{original_name}*\n{pct:.0f}% · {progress_callback.downloaded//(1024*1024)} / {total//(1024*1024)} MB"
                 edit_bale(bale_progress_id, text)
                 edit_telegram(tg_progress_id, text)
                 last_update = now
+        progress_callback.downloaded = 0
 
-        # Start the high‑speed download
         await download_large_file(client, message, download_path, progress_callback)
 
         elapsed = time.time() - start
