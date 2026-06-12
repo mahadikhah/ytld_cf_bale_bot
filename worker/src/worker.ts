@@ -23,7 +23,8 @@ export interface Env {
   ADMIN_CHAT_ID: string;
   WORKER_SECRET: string;
   TELEGRAM_BOT_TOKEN: string;
-  ENABLE_S3: string;                  // "true" to show S3 button
+  ENABLE_S3: string;          
+  TG_CHANNEL_ID: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
