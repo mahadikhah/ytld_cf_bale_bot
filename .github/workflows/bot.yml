@@ -142,6 +142,20 @@ jobs:
           fi
           echo "Cookies file looks valid."
 
+          
+      - name: Restore Instagram cookies
+        env:
+          INSTAGRAM_COOKIES_B64: ${{ secrets.INSTAGRAM_COOKIES_B64 }}
+        run: |
+          if [ -n "$INSTAGRAM_COOKIES_B64" ]; then
+            echo "$INSTAGRAM_COOKIES_B64" | base64 -d > ig_cookies.txt
+            echo "Instagram cookies restored"
+          else
+            echo "No Instagram cookies provided – public content only"
+          fi
+
+        
+
       # ---- S3 steps (only when enabled AND delivery is s3) ----
       - name: Install AWS CLI (S3)
         if: env.ENABLE_S3 == 'true' && inputs.action == 'download' && inputs.delivery == 's3'
