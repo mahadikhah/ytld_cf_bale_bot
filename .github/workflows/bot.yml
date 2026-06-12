@@ -13,6 +13,7 @@ on:
           - music_search
           - music_download
           - batch_music
+          - instagram          
       chat_id:
         description: 'Bale chat ID'
         required: true
