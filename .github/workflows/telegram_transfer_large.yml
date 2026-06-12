@@ -1,0 +1,37 @@
+name: Large Telegram Transfer (user account)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bale_chat_id:
+        description: 'Target Bale chat ID'
+        required: true
+      channel_id:
+        description: 'Channel ID where file was forwarded'
+        required: true
+      message_id:
+        description: 'Message ID in the channel'
+        required: true
+      file_name:
+        description: 'Original file name'
+        required: true
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        run: pip install telethon requests
+
+      - name: Download via userbot and send to Bale
+        env:
+          TG_USER_SESSION: ${{ secrets.TG_USER_SESSION }}
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.bale_chat_id }}
+          CHANNEL_ID: ${{ inputs.channel_id }}
+          MESSAGE_ID: ${{ inputs.message_id }}
+          FILE_NAME: ${{ inputs.file_name }}
+        run: python tg_download.py
