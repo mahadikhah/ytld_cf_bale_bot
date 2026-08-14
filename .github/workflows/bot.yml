@@ -189,6 +189,7 @@ jobs:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
           DELIVERY_METHOD: ${{ inputs.delivery }}
+          ENABLE_S3: ${{ secrets.ENABLE_S3 }}
           S3_ACCOUNT_1_ENDPOINT: ${{ secrets.S3_ACCOUNT_1_ENDPOINT }}
           S3_ACCOUNT_1_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_1_ACCESS_KEY }}
           S3_ACCOUNT_1_SECRET_KEY: ${{ secrets.S3_ACCOUNT_1_SECRET_KEY }}
