@@ -21,6 +21,7 @@ FORMAT_ID = os.environ.get("FORMAT_ID", "")
 DELIVERY_METHOD = os.environ.get("DELIVERY_METHOD", "bale")
 ENABLE_S3 = os.environ.get("ENABLE_S3", "false").lower() == "true"
 MUSIC_QUERY = os.environ.get("QUERY", "")   # for music search & batch
+STARTING_S3_ACCOUNT_NUMBER = os.environ.get("ENABLE_S3", 1)
 
 TEMP_DIR = "temp_videos"
 MAX_FILE_SIZE = 15 * 1024 * 1024   # 15 MB chunks (safe under Bale's 20 MB limit)
@@ -264,7 +265,7 @@ def cleanup():
 # ---------- S3 helpers (only used when ENABLE_S3 is true) ----------
 def upload_to_s3(file_path, file_name):
     accounts = []
-    for i in range(1, 6):
+    for i in range(STARTING_S3_ACCOUNT_NUMBER, 6):
         prefix = f"S3_ACCOUNT_{i}_"
         endpoint = os.environ.get(f"{prefix}ENDPOINT")
         if not endpoint:
