@@ -21,7 +21,7 @@ FORMAT_ID = os.environ.get("FORMAT_ID", "")
 DELIVERY_METHOD = os.environ.get("DELIVERY_METHOD", "bale")
 ENABLE_S3 = os.environ.get("ENABLE_S3", "false").lower() == "true"
 MUSIC_QUERY = os.environ.get("QUERY", "")   # for music search & batch
-STARTING_S3_ACCOUNT_NUMBER = os.environ.get("ENABLE_S3", 1)
+STARTING_S3_ACCOUNT_NUMBER = int(os.environ.get("ENABLE_S3", 1))
 
 TEMP_DIR = "temp_videos"
 MAX_FILE_SIZE = 15 * 1024 * 1024   # 15 MB chunks (safe under Bale's 20 MB limit)
