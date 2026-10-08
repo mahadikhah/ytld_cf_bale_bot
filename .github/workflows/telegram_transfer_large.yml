@@ -18,6 +18,10 @@ on:
       tg_chat_id:
         description: 'Telegram chat ID (to send progress)'
         required: true
+      delivery:
+        description: 'Delivery method (bale or s3)'
+        required: false
+        default: 'bale'
 
 concurrency:
   group: large-telegram-transfer
@@ -31,7 +35,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Python
-        run: pip install telethon requests
+        run: pip install telethon requests awscli
 
       - name: Download via userbot and send to Bale
         env:
@@ -43,6 +47,33 @@ jobs:
           MESSAGE_ID: ${{ inputs.message_id }}
           FILE_NAME: ${{ inputs.file_name }}
           TG_CHAT_ID: ${{ inputs.tg_chat_id }}
+          DELIVERY_METHOD: ${{ inputs.delivery }}
+          ENABLE_S3: ${{ secrets.ENABLE_S3 }}
+          S3_ACCOUNT_1_ENDPOINT: ${{ secrets.S3_ACCOUNT_1_ENDPOINT }}
+          S3_ACCOUNT_1_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_1_ACCESS_KEY }}
+          S3_ACCOUNT_1_SECRET_KEY: ${{ secrets.S3_ACCOUNT_1_SECRET_KEY }}
+          S3_ACCOUNT_1_REGION: ${{ secrets.S3_ACCOUNT_1_REGION }}
+          S3_ACCOUNT_1_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_1_BUCKET_NAME }}
+          S3_ACCOUNT_2_ENDPOINT: ${{ secrets.S3_ACCOUNT_2_ENDPOINT }}
+          S3_ACCOUNT_2_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_2_ACCESS_KEY }}
+          S3_ACCOUNT_2_SECRET_KEY: ${{ secrets.S3_ACCOUNT_2_SECRET_KEY }}
+          S3_ACCOUNT_2_REGION: ${{ secrets.S3_ACCOUNT_2_REGION }}
+          S3_ACCOUNT_2_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_2_BUCKET_NAME }}
+          S3_ACCOUNT_3_ENDPOINT: ${{ secrets.S3_ACCOUNT_3_ENDPOINT }}
+          S3_ACCOUNT_3_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_3_ACCESS_KEY }}
+          S3_ACCOUNT_3_SECRET_KEY: ${{ secrets.S3_ACCOUNT_3_SECRET_KEY }}
+          S3_ACCOUNT_3_REGION: ${{ secrets.S3_ACCOUNT_3_REGION }}
+          S3_ACCOUNT_3_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_3_BUCKET_NAME }}
+          S3_ACCOUNT_4_ENDPOINT: ${{ secrets.S3_ACCOUNT_4_ENDPOINT }}
+          S3_ACCOUNT_4_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_4_ACCESS_KEY }}
+          S3_ACCOUNT_4_SECRET_KEY: ${{ secrets.S3_ACCOUNT_4_SECRET_KEY }}
+          S3_ACCOUNT_4_REGION: ${{ secrets.S3_ACCOUNT_4_REGION }}
+          S3_ACCOUNT_4_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_4_BUCKET_NAME }}
+          S3_ACCOUNT_5_ENDPOINT: ${{ secrets.S3_ACCOUNT_5_ENDPOINT }}
+          S3_ACCOUNT_5_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_5_ACCESS_KEY }}
+          S3_ACCOUNT_5_SECRET_KEY: ${{ secrets.S3_ACCOUNT_5_SECRET_KEY }}
+          S3_ACCOUNT_5_REGION: ${{ secrets.S3_ACCOUNT_5_REGION }}
+          S3_ACCOUNT_5_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_5_BUCKET_NAME }}
         run: python tg_download.py
 
       - name: Unlock worker queue
