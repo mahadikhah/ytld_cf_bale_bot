@@ -49,6 +49,7 @@ jobs:
           TG_CHAT_ID: ${{ inputs.tg_chat_id }}
           DELIVERY_METHOD: ${{ inputs.delivery }}
           ENABLE_S3: ${{ secrets.ENABLE_S3 }}
+          STARTING_S3_ACCOUNT_NUMBER: ${{ secrets.STARTING_S3_ACCOUNT_NUMBER }}
           S3_ACCOUNT_1_ENDPOINT: ${{ secrets.S3_ACCOUNT_1_ENDPOINT }}
           S3_ACCOUNT_1_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_1_ACCESS_KEY }}
           S3_ACCOUNT_1_SECRET_KEY: ${{ secrets.S3_ACCOUNT_1_SECRET_KEY }}
