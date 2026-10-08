@@ -5,6 +5,7 @@ from telethon.tl.types import InputDocumentFileLocation
 import requests
 from bot_utils import format_progress_bar, BaleMessenger, TelegramMessenger, unlock_queue
 
+
 API_ID = 2040
 API_HASH = "b18441a1ff607e10a989891a5462e627"
 
@@ -18,6 +19,8 @@ message_id = int(os.environ["MESSAGE_ID"])
 original_name = os.environ["FILE_NAME"]
 worker_url = os.environ.get("WORKER_URL")
 worker_secret = os.environ.get("WORKER_SECRET")
+ENABLE_S3 = os.environ.get("ENABLE_S3", "false").lower() == "true"
+DELIVERY_METHOD = os.environ.get("DELIVERY_METHOD", "bale")
 
 MAX_SIZE = 15 * 1024 * 1024
 PARALLEL_CHUNKS = 8
@@ -39,6 +42,114 @@ def upload_file(path, caption):
         return True
     print(f"[Upload] Failed: {resp.text[:200]}")
     return False
+# ---------- upload_to_s3 ----------
+def upload_to_s3(file_path, file_name):
+    """Upload to the first available S3 bucket and return a presigned URL, or None."""
+    if not ENABLE_S3:
+        return None
+    accounts = []
+    for i in range(1, 6):
+        prefix = f"S3_ACCOUNT_{i}_"
+        endpoint = os.environ.get(f"{prefix}ENDPOINT")
+        if not endpoint:
+            continue
+        access_key = os.environ.get(f"{prefix}ACCESS_KEY")
+        secret_key = os.environ.get(f"{prefix}SECRET_KEY")
+        region = os.environ.get(f"{prefix}REGION")
+        bucket = os.environ.get(f"{prefix}BUCKET_NAME")
+        if not all([access_key, secret_key, region, bucket]):
+            continue
+        accounts.append({
+            "endpoint": endpoint,
+            "access_key": access_key,
+            "secret_key": secret_key,
+            "region": region,
+            "bucket": bucket,
+        })
+    if not accounts:
+        print("[S3] No accounts configured")
+        return None
+
+    best = None
+    for acc in accounts:
+        try:
+            env = {
+                **os.environ,
+                "AWS_ACCESS_KEY_ID": acc["access_key"],
+                "AWS_SECRET_ACCESS_KEY": acc["secret_key"],
+                "AWS_DEFAULT_REGION": acc["region"],
+            }
+            cmd = [
+                "aws", "s3", "ls", f"s3://{acc['bucket']}/",
+                "--recursive", "--endpoint-url", acc["endpoint"],
+                "--region", acc["region"], "--summarize"
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
+            size_line = [l for l in res.stdout.splitlines() if "Total Size" in l]
+            used = 0
+            if size_line:
+                used = int(size_line[0].split(":")[-1].strip())
+            free = 5 * 1024 * 1024 * 1024 - used
+            if free > 100 * 1024 * 1024:
+                best = acc
+                print(f"[S3] Selected bucket '{acc['bucket']}' with {free//1024//1024} MB free")
+                break
+        except Exception as e:
+            print(f"[S3] Error checking bucket '{acc['bucket']}': {e}")
+
+    if not best:
+        print("[S3] No bucket with enough space")
+        return None
+
+    acc = best
+    s3_key = f"{file_name}_{int(time.time())}"
+    env = {
+        **os.environ,
+        "AWS_ACCESS_KEY_ID": acc["access_key"],
+        "AWS_SECRET_ACCESS_KEY": acc["secret_key"],
+        "AWS_DEFAULT_REGION": acc["region"],
+    }
+    cmd_upload = [
+        "aws", "s3", "cp", file_path, f"s3://{acc['bucket']}/{s3_key}",
+        "--endpoint-url", acc["endpoint"], "--region", acc["region"]
+    ]
+    try:
+        print(f"[S3] Uploading {file_name}…")
+        upload_res = subprocess.run(cmd_upload, capture_output=True, text=True, env=env, timeout=180)
+        if upload_res.returncode != 0:
+            print(f"[S3] Upload failed: {upload_res.stderr.strip()}")
+            return None
+    except subprocess.TimeoutExpired:
+        print("[S3] Upload timed out")
+        return None
+
+    cmd_presign = [
+        "aws", "s3", "presign", f"s3://{acc['bucket']}/{s3_key}",
+        "--endpoint-url", acc["endpoint"], "--region", acc["region"],
+        "--expires-in", "7200"
+    ]
+    try:
+        presign_res = subprocess.run(cmd_presign, capture_output=True, text=True, env=env, timeout=15)
+        if presign_res.returncode != 0:
+            print(f"[S3] Presign failed: {presign_res.stderr.strip()}")
+            return None
+    except subprocess.TimeoutExpired:
+        print("[S3] Presign timed out")
+        return None
+    presigned = presign_res.stdout.strip()
+
+    # Expiry marker for automatic cleanup
+    expire_epoch = int(time.time()) + 7200
+    marker_key = f"{s3_key}.txt"
+    with open("/tmp/marker.txt", "w") as f:
+        f.write(str(expire_epoch))
+    cmd_marker = [
+        "aws", "s3", "cp", "/tmp/marker.txt", f"s3://{acc['bucket']}/{marker_key}",
+        "--endpoint-url", acc["endpoint"], "--region", acc["region"]
+    ]
+    subprocess.run(cmd_marker, capture_output=True, text=True, env=env, timeout=15)
+    print("[S3] Upload successful")
+    return presigned
 
 # ---------- Parallel download (unchanged) ----------
 async def download_chunk(client, location, offset, size, part_num, progress_dict):
