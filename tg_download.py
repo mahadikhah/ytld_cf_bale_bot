@@ -148,51 +148,85 @@ async def main():
 
         # --- Split & upload ---
         if local_size <= MAX_SIZE:
-            bale.send("📤 Uploading directly to Bale…")
-            telegram.send("📤 Uploading directly to Bale…")
-            if upload_file(download_path, original_name):
-                bale.send(f"✅ *{original_name}* sent.")
-                telegram.send(f"✅ *{original_name}* sent.")
+            if DELIVERY_METHOD == "s3":
+                bale.send("☁️ Uploading to cloud…")
+                url = upload_to_s3(download_path, safe_name)
+                if url:
+                    bale.send(f"✅ *Download link (valid 2 h):*\n{url}")
+                    telegram.send(f"✅ *Download link:*\n{url}")
+                else:
+                    bale.send("❌ Cloud upload failed.")
+                    telegram.send("❌ Cloud upload failed.")
             else:
-                bale.send("❌ Upload failed.")
-                telegram.send("❌ Upload failed.")
+                bale.send("📤 Uploading directly to Bale…")
+                telegram.send("📤 Uploading directly to Bale…")
+                if upload_file(download_path, original_name):
+                    bale.send(f"✅ *{original_name}* sent.")
+                    telegram.send(f"✅ *{original_name}* sent.")
+                else:
+                    bale.send("❌ Upload failed.")
+                    telegram.send("❌ Upload failed.")
         else:
-            bale.send(f"📦 Splitting {local_size//(1024*1024)} MB file into parts…")
-            telegram.send(f"📦 Splitting {local_size//(1024*1024)} MB file into parts…")
-            os.chdir(download_dir)
+            # Use a distinct name for the split archive to avoid collision with source file
             base = os.path.splitext(safe_name)[0]
-            subprocess.run(["zip", "-s", "15m", f"{base}.zip", safe_name], check=True)
+            split_zip_base = f"{base}_split.zip"
 
-            parts = sorted(
-                [f for f in os.listdir(download_dir) if f.startswith(base) and (f.endswith('.zip') or '.z' in f)],
-                key=lambda x: (not x.endswith('.zip'), x)
-            )
-            if not parts:
-                bale.send("❌ Splitting failed.")
-                telegram.send("❌ Splitting failed.")
-                return
-            total = len(parts)
-            bale.send(f"📤 Uploading {total} parts…")
-            telegram.send(f"📤 Uploading {total} parts…")
-            for idx, part in enumerate(parts, 1):
-                bale.send(f"⬆️ Part {idx}/{total} ({part})")
-                telegram.send(f"⬆️ Part {idx}/{total} ({part})")
-                part_path = os.path.join(download_dir, part)
-                if not upload_file(part_path, part):
-                    bale.send(f"❌ Failed to upload part {idx}. Aborting.")
-                    telegram.send(f"❌ Failed to upload part {idx}. Aborting.")
+            if DELIVERY_METHOD == "s3":
+                # For S3 we can upload the whole file without splitting
+                bale.send(f"☁️ Uploading {local_size//(1024*1024)} MB to cloud…")
+                telegram.send(f"☁️ Uploading {local_size//(1024*1024)} MB to cloud…")
+                url = upload_to_s3(download_path, safe_name)
+                if url:
+                    bale.send(f"✅ *Download link (valid 2 h):*\n{url}")
+                    telegram.send(f"✅ *Download link:*\n{url}")
+                else:
+                    bale.send("❌ Cloud upload failed.")
+                    telegram.send("❌ Cloud upload failed.")
+            else:
+                bale.send(f"📦 Splitting {local_size//(1024*1024)} MB file into parts…")
+                telegram.send(f"📦 Splitting {local_size//(1024*1024)} MB file into parts…")
+                os.chdir(download_dir)
+                # Important: use --out and a different name
+                subprocess.run(
+                    ["zip", "-s", "15m", split_zip_base, safe_name, "--out", split_zip_base],
+                    check=True
+                )
+
+                # Collect split parts (avoid matching the source file)
+                parts = sorted(
+                    [f for f in os.listdir(download_dir)
+                     if f.startswith(base + "_split") and (f.endswith('.zip') or '.z' in f)],
+                    key=lambda x: (not x.endswith('.zip'), x)
+                )
+                if not parts:
+                    bale.send("❌ Splitting failed.")
+                    telegram.send("❌ Splitting failed.")
                     return
-                time.sleep(1)
-            ext = os.path.splitext(original_name)[1] or ".file"
-            final_msg = (
-                f"✅ *File forwarded successfully!*\n\n"
-                f"*How to open your file:*\n"
-                f"1. Download all the parts (`.z01`, `.z02`... and `.zip`) into the *same folder*.\n"
-                f"2. Open/Extract ONLY the final `.zip` file.\n"
-                f"3. Your system will reassemble the full `{ext}` file automatically."
-            )
-            bale.send(final_msg)
-            telegram.send(final_msg)
+
+                total = len(parts)
+                bale.send(f"📤 Uploading {total} parts…")
+                telegram.send(f"📤 Uploading {total} parts…")
+                for idx, part in enumerate(parts, 1):
+                    bale.send(f"⬆️ Part {idx}/{total} ({part})")
+                    telegram.send(f"⬆️ Part {idx}/{total} ({part})")
+                    part_path = os.path.join(download_dir, part)
+                    if not upload_file(part_path, part):
+                        bale.send(f"❌ Failed to upload part {idx}. Aborting.")
+                        telegram.send(f"❌ Failed to upload part {idx}. Aborting.")
+                        return
+                    time.sleep(1)
+
+                ext = os.path.splitext(original_name)[1] or ".file"
+                final_msg = (
+                    f"✅ *File forwarded successfully!*\n\n"
+                    f"*How to open your file:*\n"
+                    f"1. Download all the parts (`.z01`, `.z02`... and `.zip`) into the *same folder*.\n"
+                    f"2. Open/Extract ONLY the final `.zip` file.\n"
+                    f"3. Your system will reassemble the full `{ext}` file automatically."
+                )
+                bale.send(final_msg)
+                telegram.send(final_msg)
+
     except Exception as e:
         print(f"[Error] {e}")
         telegram.send(f"❌ Error: {str(e)[:200]}")
