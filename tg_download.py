@@ -21,6 +21,7 @@ worker_url = os.environ.get("WORKER_URL")
 worker_secret = os.environ.get("WORKER_SECRET")
 ENABLE_S3 = os.environ.get("ENABLE_S3", "false").lower() == "true"
 DELIVERY_METHOD = os.environ.get("DELIVERY_METHOD", "bale")
+STARTING_S3_ACCOUNT_NUMBER = int(os.environ.get("STARTING_S3_ACCOUNT_NUMBER", 1))
 
 MAX_SIZE = 15 * 1024 * 1024
 PARALLEL_CHUNKS = 8
@@ -48,7 +49,7 @@ def upload_to_s3(file_path, file_name):
     if not ENABLE_S3:
         return None
     accounts = []
-    for i in range(1, 6):
+    for i in range(STARTING_S3_ACCOUNT_NUMBER, 6):
         prefix = f"S3_ACCOUNT_{i}_"
         endpoint = os.environ.get(f"{prefix}ENDPOINT")
         if not endpoint:
