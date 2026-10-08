@@ -6,6 +6,43 @@ const MAX_DIRECT_SIZE = 20 * 1024 * 1024;   // above 20 MB we must use channel +
 
 export async function processTelegramUpdate(env: Env, update: any) {
   const msg = update.message || update.channel_post;
+  
+    if (update.callback_query) {
+    const cb = update.callback_query;
+    const cbData = cb.data;
+    const chatId = cb.message.chat.id;
+    if (cbData.startsWith('tg_large_method|')) {
+      const method = cbData.split('|')[1];
+      const stored = await env.BOT_STATE.get(`tg_large:${chatId}`);
+      if (!stored) {
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback_query_id: cb.id, text: 'Session expired.', show_alert: true }),
+        });
+        return;
+      }
+      const info = JSON.parse(stored);
+      await env.BOT_STATE.delete(`tg_large:${chatId}`);
+      await env.USER_PLANS.put(`dl_queue:${info.bale_chat}`, 'true');
+      await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: cb.id, text: `Delivery: ${method}` }),
+      });
+      await sendTelegramMessage(env, chatId, '📦 Processing via user account…');
+      await triggerWorkflow(env, {
+        bale_chat_id: info.bale_chat,
+        channel_id: info.channel_id,
+        message_id: info.message_id.toString(),
+        file_name: info.file_name,
+        tg_chat_id: chatId.toString(),
+        delivery: method,
+      }, 'telegram_transfer_large.yml');
+    }
+    return;
+  }
+  
   if (!msg) return;
 
   const chatId = msg.chat.id;
@@ -107,57 +144,80 @@ export async function processTelegramUpdate(env: Env, update: any) {
     ? `📩 *${escapeMarkdown(msg.from?.first_name || 'Telegram')}*:\n${escapeMarkdown(msg.caption)}`
     : undefined;
 
-      // ---------- Large files (>20 MB): forward to channel → user account workflow ----------
-      if (fileSize > MAX_DIRECT_SIZE) {
-        const channelId = env.TG_CHANNEL_ID;
-        if (!channelId) {
-          await sendTelegramMessage(env, chatId, '❌ Large file support not configured.');
-          return;
+  // ---------- Large files (>20 MB) ----------
+  if (fileSize > MAX_DIRECT_SIZE) {
+    const channelId = env.TG_CHANNEL_ID;
+    if (!channelId) {
+      await sendTelegramMessage(env, chatId, '❌ Large file support not configured.');
+      return;
+    }
+    const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+    if (isQueued === 'true') {
+      await sendTelegramMessage(env, chatId, '⚠️ You already have a download in progress.');
+      return;
+    }
+    try {
+      const fwdResp = await fetch(
+        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/forwardMessage`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: channelId,
+            from_chat_id: chatId,
+            message_id: msg.message_id,
+          }),
         }
-        // Check queue (reuse dl_queue)
-        const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
-        if (isQueued === 'true') {
-          await sendTelegramMessage(env, chatId, '⚠️ You already have a download in progress. Please wait.');
-          return;
-        }
-        try {
-          const fwdResp = await fetch(
-            `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/forwardMessage`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                chat_id: channelId,
-                from_chat_id: chatId,
-                message_id: msg.message_id,
-              }),
+      );
+      const fwdData: any = await fwdResp.json();
+      if (!fwdData.ok) throw new Error(fwdData.description);
+
+      const channelMsgId = fwdData.result.message_id;
+
+      // Save info for the callback
+      await env.BOT_STATE.put(`tg_large:${chatId}`, JSON.stringify({
+        channel_id: channelId,
+        message_id: channelMsgId,
+        file_name: fileName,
+        bale_chat: baleChatId,
+      }), { expirationTtl: 300 });
+
+      const s3Enabled = env.ENABLE_S3 === 'true';
+      if (s3Enabled) {
+        await sendTelegramMessage(env, chatId, '📤 Choose delivery method:');
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: 'Where should I send the file?',
+            reply_markup: {
+              inline_keyboard: [[
+                { text: '📥 Send to Bale', callback_data: 'tg_large_method|bale' },
+                { text: '☁️ Upload to S3', callback_data: 'tg_large_method|s3' },
+              ]]
             }
-          );
-          const fwdData: any = await fwdResp.json();
-          if (!fwdData.ok) throw new Error(fwdData.description);
-
-          const channelMsgId = fwdData.result.message_id;
-
-          // Lock the queue
-          await env.USER_PLANS.put(`dl_queue:${baleChatId}`, 'true');
-
-          await sendTelegramMessage(env, chatId, '📦 Large file — processing via user account…');
-
-          await triggerWorkflow(env, {
-            bale_chat_id: baleChatId,
-            channel_id: channelId,
-            message_id: channelMsgId.toString(),
-            file_name: fileName,
-            tg_chat_id: chatId.toString(),          // ← add this line
-          }, 'telegram_transfer_large.yml');
-          
-        } catch (e) {
-          console.error('Forward to channel failed:', e);
-          await sendTelegramMessage(env, chatId, '❌ Failed to process large file. Please try again.');
-        }
-        return;
+          })
+        });
+      } else {
+        // No S3 – trigger directly
+        await env.USER_PLANS.put(`dl_queue:${baleChatId}`, 'true');
+        await sendTelegramMessage(env, chatId, '📦 Large file — processing via user account…');
+        await triggerWorkflow(env, {
+          bale_chat_id: baleChatId,
+          channel_id: channelId,
+          message_id: channelMsgId.toString(),
+          file_name: fileName,
+          tg_chat_id: chatId.toString(),
+          delivery: 'bale',
+        }, 'telegram_transfer_large.yml');
       }
-  
+    } catch (e) {
+      console.error('Forward to channel failed:', e);
+      await sendTelegramMessage(env, chatId, '❌ Failed to process large file. Please try again.');
+    }
+    return;
+  }  
   // ---------- Small / medium files (≤20 MB) ----------
   const fileInfo = await getTelegramFile(env, fileId);
   if (!fileInfo || !fileInfo.file_path) {
