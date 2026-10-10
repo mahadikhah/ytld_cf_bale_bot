@@ -186,6 +186,7 @@ def get_video_formats(url):
     return title, duration, unique
 
 def download_video(url, format_id, output_path):
+def download_video(url, format_id, output_path):
     cmd = [
         "yt-dlp", "--cookies", "cookies.txt",
         "--remote-components", "ejs:github",
@@ -193,11 +194,16 @@ def download_video(url, format_id, output_path):
         "--no-check-certificates",
         "-f", f"{format_id}+bestaudio[ext=m4a]/bestaudio",
         "--merge-output-format", "mp4",
+        # Subtitle options
         "--write-subs",
         "--write-auto-subs",
-        "--sub-langs", "all",
+        "--sub-langs", "en,fa,hi,ur,ar,tr,ru,zh,ja,ko", # Common original languages
         "--convert-subs", "srt",
         "--sub-format", "srt",
+        # Delay options to avoid rate limiting
+        "--sleep-subtitles", "2",   # Wait 2s before each subtitle download
+        "--sleep-requests", "1",    # Wait 1s between requests during extraction
+        "--retries", "10",           # Retry on failure
         "-o", output_path, url
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -208,7 +214,6 @@ def download_video(url, format_id, output_path):
         raise Exception("Downloaded file empty")
     ensure_mp4(output_path)
     return output_path
-
 
 def split_and_send(file_path, base_name):
     file_size = os.path.getsize(file_path)
