@@ -100,6 +100,8 @@ def get_video_formats(url):
         "--remote-components", "ejs:github",
         "--extractor-args", "youtube:skip=webpage",
         "--no-check-certificates",
+        "--sleep-requests", "2",
+        "--retries", "10",
         "--dump-json", url
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -189,7 +191,7 @@ def download_video(url, format_id, output_path):
     cmd = [
         "yt-dlp", "--cookies", "cookies.txt",
         "--remote-components", "ejs:github",
-        "--extractor-args", "youtube:skip=webpage,translated_subs",
+        "--extractor-args", "youtube:skip=webpage,translated_subs;player_client=ios,android",
         "--no-check-certificates",
         "-f", f"{format_id}+bestaudio[ext=m4a]/bestaudio",
         "--merge-output-format", "mp4",
@@ -201,7 +203,7 @@ def download_video(url, format_id, output_path):
         "--sub-format", "srt",
         # Delay options to avoid rate limiting
         "--sleep-subtitles", "2",   # Wait 2s before each subtitle download
-        "--sleep-requests", "1",    # Wait 1s between requests during extraction
+        "--sleep-requests", "2",    # Wait 1s between requests during extraction
         "--retries", "10",           # Retry on failure
         "-o", output_path, url
     ]
