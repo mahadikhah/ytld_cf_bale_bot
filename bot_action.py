@@ -193,6 +193,13 @@ def download_video(url, format_id, output_path):
         "--no-check-certificates",
         "-f", f"{format_id}+bestaudio[ext=m4a]/bestaudio",
         "--merge-output-format", "mp4",
+                # Subtitle options
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-langs", "en,fa",
+        "--convert-subs", "srt",
+        "--sub-format", "srt",
+
         "-o", output_path, url
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -416,16 +423,33 @@ def main():
             download_video(VIDEO_URL, FORMAT_ID, out_file)
             file_size = os.path.getsize(out_file)
 
+            # Find subtitle files (downloaded alongside the video)
+            srt_files = list(Path(TEMP_DIR).glob("*.srt"))
+
             delivery_method = DELIVERY_METHOD
             if delivery_method == "s3" and not ENABLE_S3:
                 logger.info("S3 disabled – falling back to Bale")
                 delivery_method = "bale"
 
             if delivery_method == "s3":
-                send_message("☁️ Uploading to cloud and generating download link...")
-                url = upload_to_s3(out_file, base_name)
-                if url:
-                    send_message(f"✅ *Your download link (valid 2 hours):*\n{url}")
+                send_message("☁️ Uploading video to cloud and generating download link...")
+                video_url_s3 = upload_to_s3(out_file, base_name)
+
+                # Upload subtitles too
+                srt_links = []
+                for srt in srt_files:
+                    srt_name = srt.stem  # e.g. "video.en"
+                    srt_url = upload_to_s3(str(srt), srt_name)
+                    if srt_url:
+                        srt_links.append((srt.name, srt_url))
+
+                if video_url_s3:
+                    msg = f"✅ *Video download link (valid 2 hours):*\n{video_url_s3}\n"
+                    if srt_links:
+                        msg += "\n📝 *Subtitle links (valid 2 hours):*\n"
+                        for name, url in srt_links:
+                            msg += f"• {name}: {url}\n"
+                    send_message(msg)
                 else:
                     send_message("❌ Cloud upload failed. Please try again later.")
             else:
@@ -439,18 +463,36 @@ def main():
                         "2. Open/Extract ONLY the final `.zip` file.\n"
                         "3. Your system will automatically pull the pieces together to rebuild the full `.mp4` video."
                     )
+
+                    # Send subtitle files as Bale documents
+                    if srt_files:
+                        send_message(f"📝 Found {len(srt_files)} subtitle file(s). Sending…")
+                        for srt in srt_files:
+                            logger.info(f"Sending subtitle: {srt.name}")
+                            send_document(str(srt))
+                        send_message("✅ Subtitles sent!")
                 except Exception as e:
                     logger.exception("Bale upload failed")
                     if ENABLE_S3:
                         send_message("⚠️ Bale upload failed. Trying cloud upload instead...")
-                        url = upload_to_s3(out_file, base_name)
-                        if url:
-                            send_message(f"✅ *Your download link (valid 2 hours):*\n{url}")
+                        video_url_s3 = upload_to_s3(out_file, base_name)
+                        srt_links = []
+                        for srt in srt_files:
+                            srt_url = upload_to_s3(str(srt), srt.stem)
+                            if srt_url:
+                                srt_links.append((srt.name, srt_url))
+
+                        if video_url_s3:
+                            msg = f"✅ *Video download link (valid 2 hours):*\n{video_url_s3}\n"
+                            if srt_links:
+                                msg += "\n📝 *Subtitle links (valid 2 hours):*\n"
+                                for name, url in srt_links:
+                                    msg += f"• {name}: {url}\n"
+                            send_message(msg)
                         else:
                             send_message("❌ All upload methods failed. Sorry!")
                     else:
                         send_message("❌ Bale upload failed and S3 is not enabled. Sorry!")
-
         # ---------- Music search ----------
         elif ACTION == "music_search":
             if not MUSIC_QUERY:
