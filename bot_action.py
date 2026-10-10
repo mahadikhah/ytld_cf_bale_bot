@@ -330,10 +330,36 @@ def upload_to_s3(file_path, file_name):
         "AWS_SECRET_ACCESS_KEY": acc["secret_key"],
         "AWS_DEFAULT_REGION": acc["region"],
     }
+    # Determine content type & disposition based on file extension
+    ext = os.path.splitext(file_path)[1].lower()
+    extra_args = []
+    if ext == ".srt":
+        extra_args = [
+            "--content-type", "application/x-subrip",
+            "--content-disposition", f'attachment; filename="{os.path.basename(file_path)}"',
+        ]
+    elif ext == ".mp4":
+        extra_args = ["--content-type", "video/mp4"]
+    elif ext == ".mp3":
+        extra_args = ["--content-type", "audio/mpeg"]
+    elif ext == ".zip":
+        extra_args = [
+            "--content-type", "application/zip",
+            "--content-disposition", f'attachment; filename="{os.path.basename(file_path)}"',
+        ]
+    elif ext == ".mhtml":
+        extra_args = ["--content-type", "multipart/related"]
+    elif ext == ".html":
+        extra_args = ["--content-type", "text/html"]
+    # For anything else, S3 uses the default (binary/octet-stream)
+
     cmd_upload = [
         "aws", "s3", "cp", file_path, f"s3://{acc['bucket']}/{s3_key}",
-        "--endpoint-url", acc["endpoint"], "--region", acc["region"]
-    ]
+        "--endpoint-url", acc["endpoint"],
+        "--region", acc["region"],
+        "--no-progress",
+    ] + extra_args
+    
     try:
         logger.info("Starting S3 upload (timeout 180s)…")
         upload_res = subprocess.run(cmd_upload, capture_output=True, text=True, env=env, timeout=180)
