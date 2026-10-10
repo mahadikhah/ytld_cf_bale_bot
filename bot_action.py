@@ -186,7 +186,6 @@ def get_video_formats(url):
     return title, duration, unique
 
 def download_video(url, format_id, output_path):
-def download_video(url, format_id, output_path):
     cmd = [
         "yt-dlp", "--cookies", "cookies.txt",
         "--remote-components", "ejs:github",
