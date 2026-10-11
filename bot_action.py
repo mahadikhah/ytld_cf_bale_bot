@@ -100,8 +100,6 @@ def get_video_formats(url):
         "--remote-components", "ejs:github",
         "--extractor-args", "youtube:skip=webpage",
         "--no-check-certificates",
-        "--sleep-requests", "2",
-        "--retries", "10",
         "--dump-json", url
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -195,16 +193,13 @@ def download_video(url, format_id, output_path):
         "--no-check-certificates",
         "-f", f"{format_id}+bestaudio[ext=m4a]/bestaudio",
         "--merge-output-format", "mp4",
-        # Subtitle options
+                # Subtitle options
         "--write-subs",
         "--write-auto-subs",
-        "--sub-langs", "en,fa", # Common original languages
+        "--sub-langs", "en,fa",
         "--convert-subs", "srt",
         "--sub-format", "srt",
-        # Delay options to avoid rate limiting
-        "--sleep-subtitles", "2",   # Wait 2s before each subtitle download
-        "--sleep-requests", "2",    # Wait 1s between requests during extraction
-        "--retries", "10",           # Retry on failure
+
         "-o", output_path, url
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
