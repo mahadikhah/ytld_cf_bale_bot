@@ -191,7 +191,7 @@ def download_video(url, format_id, output_path):
     cmd = [
         "yt-dlp", "--cookies", "cookies.txt",
         "--remote-components", "ejs:github",
-        "--extractor-args", "youtube:skip=webpage,translated_subs;player_client=ios,android",
+        "--extractor-args", "youtube:skip=webpage,translated_subs",
         "--no-check-certificates",
         "-f", f"{format_id}+bestaudio[ext=m4a]/bestaudio",
         "--merge-output-format", "mp4",
