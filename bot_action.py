@@ -191,14 +191,14 @@ def download_video(url, format_id, output_path):
     cmd = [
         "yt-dlp", "--cookies", "cookies.txt",
         "--remote-components", "ejs:github",
-        "--extractor-args", "youtube:skip=webpage,translated_subs",
+        "--extractor-args", "youtube:skip=webpage",
         "--no-check-certificates",
         "-f", f"{format_id}+bestaudio[ext=m4a]/bestaudio",
         "--merge-output-format", "mp4",
         # Subtitle options
         "--write-subs",
         "--write-auto-subs",
-        "--sub-langs", "en,fa,hi,ur,ar,tr,ru,zh,ja,ko", # Common original languages
+        "--sub-langs", "en,fa", # Common original languages
         "--convert-subs", "srt",
         "--sub-format", "srt",
         # Delay options to avoid rate limiting
