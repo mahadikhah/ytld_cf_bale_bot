@@ -1128,12 +1128,52 @@ async function pollUpdates(env: Env) {
   await env.BOT_STATE.put(OFFSET_KEY, offset.toString());
 }
 
+async function maybeTriggerS3Cleanup(env: Env) {
+  const KEY = 'last_s3_cleanup';
+  const now = Math.floor(Date.now() / 1000);
+  const lastRun = parseInt((await env.BOT_STATE.get(KEY)) || '0', 10);
+
+  // Trigger every 2 hours
+  if (now - lastRun < 2 * 60 * 60) return;
+  await env.BOT_STATE.put(KEY, now.toString());
+
+  try {
+    const [owner, repo] = env.GITHUB_REPO.split('/');
+    const resp = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/dispatches`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
+          'Accept': 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'Content-Type': 'application/json',
+          'User-Agent': 'BaleYouTubeBot/1.0',
+        },
+        body: JSON.stringify({
+          event_type: 's3_cleanup',
+          client_payload: {},
+        }),
+      }
+    );
+    if (!resp.ok) {
+      console.error('S3 cleanup dispatch failed:', resp.status, await resp.text());
+    } else {
+      console.log('S3 cleanup triggered at', new Date(now * 1000).toISOString());
+    }
+  } catch (e) {
+    console.error('S3 cleanup trigger error:', e);
+  }
+}
+
 // -------------------------------------------------------
 //  WORKER EXPORT
 // -------------------------------------------------------
 export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(pollUpdates(env));
+    ctx.waitUntil(maybeTriggerS3Cleanup(env));   // ← add this
+
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
