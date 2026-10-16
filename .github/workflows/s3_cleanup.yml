@@ -1,0 +1,46 @@
+name: S3 Cleanup Expired Bot Files
+
+on:
+  workflow_dispatch:        # manual trigger
+  repository_dispatch:
+    types: [s3_cleanup]     # triggered by Cloudflare Worker cron
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install AWS CLI
+        run: pip install --quiet awscli
+
+      - name: Run cleanup
+        env:
+          STARTING_S3_ACCOUNT_NUMBER: ${{ secrets.STARTING_S3_ACCOUNT_NUMBER }}
+          S3_ACCOUNT_1_ENDPOINT: ${{ secrets.S3_ACCOUNT_1_ENDPOINT }}
+          S3_ACCOUNT_1_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_1_ACCESS_KEY }}
+          S3_ACCOUNT_1_SECRET_KEY: ${{ secrets.S3_ACCOUNT_1_SECRET_KEY }}
+          S3_ACCOUNT_1_REGION: ${{ secrets.S3_ACCOUNT_1_REGION }}
+          S3_ACCOUNT_1_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_1_BUCKET_NAME }}
+          S3_ACCOUNT_2_ENDPOINT: ${{ secrets.S3_ACCOUNT_2_ENDPOINT }}
+          S3_ACCOUNT_2_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_2_ACCESS_KEY }}
+          S3_ACCOUNT_2_SECRET_KEY: ${{ secrets.S3_ACCOUNT_2_SECRET_KEY }}
+          S3_ACCOUNT_2_REGION: ${{ secrets.S3_ACCOUNT_2_REGION }}
+          S3_ACCOUNT_2_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_2_BUCKET_NAME }}
+          S3_ACCOUNT_3_ENDPOINT: ${{ secrets.S3_ACCOUNT_3_ENDPOINT }}
+          S3_ACCOUNT_3_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_3_ACCESS_KEY }}
+          S3_ACCOUNT_3_SECRET_KEY: ${{ secrets.S3_ACCOUNT_3_SECRET_KEY }}
+          S3_ACCOUNT_3_REGION: ${{ secrets.S3_ACCOUNT_3_REGION }}
+          S3_ACCOUNT_3_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_3_BUCKET_NAME }}
+          S3_ACCOUNT_4_ENDPOINT: ${{ secrets.S3_ACCOUNT_4_ENDPOINT }}
+          S3_ACCOUNT_4_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_4_ACCESS_KEY }}
+          S3_ACCOUNT_4_SECRET_KEY: ${{ secrets.S3_ACCOUNT_4_SECRET_KEY }}
+          S3_ACCOUNT_4_REGION: ${{ secrets.S3_ACCOUNT_4_REGION }}
+          S3_ACCOUNT_4_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_4_BUCKET_NAME }}
+          S3_ACCOUNT_5_ENDPOINT: ${{ secrets.S3_ACCOUNT_5_ENDPOINT }}
+          S3_ACCOUNT_5_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_5_ACCESS_KEY }}
+          S3_ACCOUNT_5_SECRET_KEY: ${{ secrets.S3_ACCOUNT_5_SECRET_KEY }}
+          S3_ACCOUNT_5_REGION: ${{ secrets.S3_ACCOUNT_5_REGION }}
+          S3_ACCOUNT_5_BUCKET_NAME: ${{ secrets.S3_ACCOUNT_5_BUCKET_NAME }}
+        run: python s3_cleanup.py
